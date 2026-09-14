@@ -1,4 +1,11 @@
-use std::{os::windows::ffi::OsStrExt, path::Path};
+use std::{
+    os::windows::ffi::OsStrExt,
+    path::Path,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+};
 use tauri::Manager;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Environment, ICoreWebView2Environment14,
@@ -16,6 +23,11 @@ const PROBE_READY: &str = r#"{"type":"webwrap-probe-ready"}"#;
 const PROBE_COMPLETE: &str = r#"{"type":"webwrap-probe-complete"}"#;
 const VSCODE_READY: &str = r#"{"type":"webwrap-vscode-ready"}"#;
 const VSCODE_HANDLE_READY: &str = r#"{"type":"webwrap-vscode-handle-ready"}"#;
+
+const OPEN_IDLE: u8 = 0;
+const OPEN_IN_FLIGHT: u8 = 1;
+const OPEN_COMPLETED: u8 = 2;
+const OPEN_FAILED: u8 = 3;
 
 fn decode_message(message: &str) -> Option<&'static str> {
     match message {
@@ -76,6 +88,20 @@ unsafe fn mark_probe_failed(window: &tauri::WebviewWindow, webview: Option<&ICor
     }
 }
 
+fn mark_vscode_failed(
+    window: &tauri::WebviewWindow,
+    open_state: &AtomicU8,
+    reason: impl std::fmt::Display,
+) {
+    if open_state.swap(OPEN_FAILED, Ordering::AcqRel) == OPEN_FAILED {
+        return;
+    }
+    eprintln!("webview2 bridge: VS Code open failed: {reason}");
+    if let Err(error) = window.set_title("FAIL: Native bridge failed") {
+        eprintln!("webview2 bridge: failure title update failed: {error}");
+    }
+}
+
 unsafe fn post_file_handle(
     environment: &ICoreWebView2Environment,
     webview: &ICoreWebView2,
@@ -103,8 +129,34 @@ unsafe fn post_file_handle(
 
 unsafe fn dispatch_open_file_step(
     webview: ICoreWebView2,
+    expected_source: String,
+    failure_window: tauri::WebviewWindow,
+    open_state: Arc<AtomicU8>,
     step: usize,
 ) -> windows::core::Result<()> {
+    if open_state.load(Ordering::Acquire) != OPEN_IN_FLIGHT {
+        return Ok(());
+    }
+    match live_source_allows_action(&webview, &expected_source, Mode::Vscode) {
+        Ok(true) => {}
+        Ok(false) => {
+            mark_vscode_failed(
+                &failure_window,
+                &open_state,
+                "WebView2 source changed during Open File dispatch",
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            mark_vscode_failed(
+                &failure_window,
+                &open_state,
+                format!("live Source failed during Open File dispatch: {error}"),
+            );
+            return Ok(());
+        }
+    }
+
     let (method, parameters) = match step {
         0 => (
             windows::core::w!("Input.dispatchKeyEvent"),
@@ -125,7 +177,7 @@ unsafe fn dispatch_open_file_step(
         3 => (
             windows::core::w!("Runtime.evaluate"),
             windows::core::w!(
-                r#"{"expression":"new Promise(resolve=>{const deadline=performance.now()+5000;const ready=()=>{const active=document.activeElement;const selected=document.getElementById(active?.getAttribute('aria-activedescendant'));if(active?.value?.endsWith('Open File...')&&selected?.textContent?.includes('Open File...'))resolve(true);else if(performance.now()>=deadline)resolve(false);else requestAnimationFrame(ready)};ready()})","awaitPromise":true,"returnByValue":true}"#
+                r#"{"expression":"new Promise(resolve=>{const deadline=performance.now()+5000;const ready=()=>{const active=document.activeElement;const id=active?.getAttribute('aria-activedescendant');const selected=id?document.getElementById(id):null;const isReady=typeof active?.value==='string'&&active.value.endsWith('Open File...')&&selected?.textContent?.includes('Open File...');if(isReady)resolve(true);else if(performance.now()>=deadline)resolve(false);else requestAnimationFrame(ready)};ready()})","awaitPromise":true,"returnByValue":true}"#
             ),
         ),
         4 => (
@@ -143,19 +195,47 @@ unsafe fn dispatch_open_file_step(
         _ => return Ok(()),
     };
     let next_webview = webview.clone();
+    let next_source = expected_source.clone();
+    let next_window = failure_window.clone();
+    let next_state = Arc::clone(&open_state);
     let completed =
         CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |status, response| {
             let result = status.and_then(|_| {
-                if step == 3 && !response.contains(r#""value":true"#) {
-                    eprintln!("webview2 bridge: Open File command did not become ready");
+                if next_state.load(Ordering::Acquire) != OPEN_IN_FLIGHT {
                     return Ok(());
                 }
-                unsafe { dispatch_open_file_step(next_webview, step + 1) }
+                if step == 3 {
+                    let compact: String = response
+                        .chars()
+                        .filter(|character| !character.is_whitespace())
+                        .collect();
+                    if !compact.contains(r#""value":true"#) {
+                        return Err(windows::core::Error::new(
+                            windows::core::HRESULT(0x80004004u32 as i32),
+                            "Open File command did not become ready",
+                        ));
+                    }
+                }
+                if step == 5 {
+                    next_state.store(OPEN_COMPLETED, Ordering::Release);
+                    eprintln!("webview2 bridge: VS Code Open File command completed");
+                    return Ok(());
+                }
+                unsafe {
+                    dispatch_open_file_step(
+                        next_webview,
+                        next_source,
+                        next_window,
+                        next_state,
+                        step + 1,
+                    )
+                }
             });
             if let Err(error) = &result {
-                eprintln!(
-                    "webview2 bridge: Open File dispatch step {} failed: {error}",
-                    step + 1
+                mark_vscode_failed(
+                    &failure_window,
+                    &open_state,
+                    format!("Open File dispatch step {}: {error}", step + 1),
                 );
             }
             result
@@ -163,13 +243,25 @@ unsafe fn dispatch_open_file_step(
     webview.CallDevToolsProtocolMethod(method, parameters, &completed)
 }
 
-unsafe fn dispatch_open_file(webview: &ICoreWebView2) -> windows::core::Result<()> {
-    dispatch_open_file_step(webview.clone(), 0)
+unsafe fn dispatch_open_file(
+    webview: &ICoreWebView2,
+    expected_source: String,
+    failure_window: tauri::WebviewWindow,
+    open_state: Arc<AtomicU8>,
+) -> windows::core::Result<()> {
+    dispatch_open_file_step(
+        webview.clone(),
+        expected_source,
+        failure_window,
+        open_state,
+        0,
+    )
 }
 
 pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::Result<()> {
     let app_handle = window.app_handle().clone();
     let failure_window = window.clone();
+    let open_state = Arc::new(AtomicU8::new(OPEN_IDLE));
     window.with_webview(move |platform| unsafe {
         let environment = platform.environment();
         let webview = match platform.controller().CoreWebView2() {
@@ -178,6 +270,8 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                 eprintln!("webview2 bridge: CoreWebView2 unavailable: {error}");
                 if request.mode == Mode::Probe {
                     mark_probe_failed(&failure_window, None);
+                } else {
+                    mark_vscode_failed(&failure_window, &open_state, error);
                 }
                 return;
             }
@@ -185,10 +279,17 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
         let delivery_environment = environment.clone();
         let mode = request.mode;
         let event_window = failure_window.clone();
+        let event_open_state = Arc::clone(&open_state);
         let mut handle_sent = false;
-        let mut open_triggered = false;
         let handler = WebMessageReceivedEventHandler::create(Box::new(move |sender, args| {
             let (Some(sender), Some(args)) = (sender, args) else {
+                if request.mode == Mode::Vscode {
+                    mark_vscode_failed(
+                        &event_window,
+                        &event_open_state,
+                        "WebView2 event did not include sender and arguments",
+                    );
+                }
                 return Ok(());
             };
 
@@ -197,6 +298,8 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                 eprintln!("webview2 bridge: WebMessageAsJson failed: {error}");
                 if request.mode == Mode::Probe {
                     mark_probe_failed(&event_window, Some(&sender));
+                } else {
+                    mark_vscode_failed(&event_window, &event_open_state, error);
                 }
                 return Ok(());
             }
@@ -210,11 +313,20 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                 eprintln!("webview2 bridge: Source failed: {error}");
                 if request.mode == Mode::Probe {
                     mark_probe_failed(&event_window, Some(&sender));
+                } else {
+                    mark_vscode_failed(&event_window, &event_open_state, error);
                 }
                 return Ok(());
             }
             let source = take_pwstr(source);
             if !source_is_allowed(&source, request.mode) {
+                if request.mode == Mode::Vscode {
+                    mark_vscode_failed(
+                        &event_window,
+                        &event_open_state,
+                        "event source is not an allowed vscode.dev origin",
+                    );
+                }
                 return Ok(());
             }
 
@@ -251,9 +363,17 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                 (Mode::Vscode, VSCODE_READY) if !handle_sent => {
                     match live_source_allows_action(&sender, &source, request.mode) {
                         Ok(true) => {}
-                        Ok(false) => return Ok(()),
+                        Ok(false) => {
+                            mark_vscode_failed(
+                                &event_window,
+                                &event_open_state,
+                                "live source is not an allowed vscode.dev origin",
+                            );
+                            return Ok(());
+                        }
                         Err(error) => {
                             eprintln!("webview2 bridge: live Source failed: {error}");
+                            mark_vscode_failed(&event_window, &event_open_state, error);
                             return Ok(());
                         }
                     }
@@ -261,23 +381,31 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                         post_file_handle(&delivery_environment, &sender, &request.path)
                     {
                         eprintln!("webview2 bridge: handle delivery failed: {error}");
+                        mark_vscode_failed(&event_window, &event_open_state, error);
                     } else {
                         handle_sent = true;
                     }
                 }
-                (Mode::Vscode, VSCODE_HANDLE_READY) if handle_sent && !open_triggered => {
-                    match live_source_allows_action(&sender, &source, request.mode) {
-                        Ok(true) => {}
-                        Ok(false) => return Ok(()),
-                        Err(error) => {
-                            eprintln!("webview2 bridge: live Source failed: {error}");
-                            return Ok(());
-                        }
+                (Mode::Vscode, VSCODE_HANDLE_READY) if handle_sent => {
+                    if event_open_state
+                        .compare_exchange(
+                            OPEN_IDLE,
+                            OPEN_IN_FLIGHT,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        return Ok(());
                     }
-                    if let Err(error) = dispatch_open_file(&sender) {
+                    if let Err(error) = dispatch_open_file(
+                        &sender,
+                        source,
+                        event_window.clone(),
+                        Arc::clone(&event_open_state),
+                    ) {
                         eprintln!("webview2 bridge: Open File dispatch failed: {error}");
-                    } else {
-                        open_triggered = true;
+                        mark_vscode_failed(&event_window, &event_open_state, error);
                     }
                 }
                 _ => {}
