@@ -5,7 +5,9 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2ObjectCollection, ICoreWebView2ObjectCollectionView, ICoreWebView2_23,
     COREWEBVIEW2_FILE_SYSTEM_HANDLE_PERMISSION_READ_WRITE,
 };
-use webview2_com::{take_pwstr, WebMessageReceivedEventHandler};
+use webview2_com::{
+    take_pwstr, CallDevToolsProtocolMethodCompletedHandler, WebMessageReceivedEventHandler,
+};
 use windows::core::{IUnknown, Interface, PCWSTR, PWSTR};
 
 use crate::{LaunchRequest, Mode};
@@ -99,6 +101,25 @@ unsafe fn post_file_handle(
         )
 }
 
+unsafe fn dispatch_ctrl_o(webview: &ICoreWebView2) -> windows::core::Result<()> {
+    let down = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
+    webview.CallDevToolsProtocolMethod(
+        windows::core::w!("Input.dispatchKeyEvent"),
+        windows::core::w!(
+            r#"{"type":"rawKeyDown","modifiers":2,"windowsVirtualKeyCode":79,"nativeVirtualKeyCode":79,"key":"o","code":"KeyO"}"#
+        ),
+        &down,
+    )?;
+    let up = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
+    webview.CallDevToolsProtocolMethod(
+        windows::core::w!("Input.dispatchKeyEvent"),
+        windows::core::w!(
+            r#"{"type":"keyUp","modifiers":2,"windowsVirtualKeyCode":79,"nativeVirtualKeyCode":79,"key":"o","code":"KeyO"}"#
+        ),
+        &up,
+    )
+}
+
 pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::Result<()> {
     let app_handle = window.app_handle().clone();
     let failure_window = window.clone();
@@ -180,9 +201,37 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                         }
                     }
                 }
-                (Mode::Vscode, VSCODE_READY | VSCODE_HANDLE_READY) => {
-                    // Task 3 replaces this no-op with Ctrl+O and handle delivery.
-                    let _ = &mut open_triggered;
+                (Mode::Vscode, VSCODE_READY) if !handle_sent => {
+                    match live_source_allows_action(&sender, &source, request.mode) {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(()),
+                        Err(error) => {
+                            eprintln!("webview2 bridge: live Source failed: {error}");
+                            return Ok(());
+                        }
+                    }
+                    if let Err(error) =
+                        post_file_handle(&delivery_environment, &sender, &request.path)
+                    {
+                        eprintln!("webview2 bridge: handle delivery failed: {error}");
+                    } else {
+                        handle_sent = true;
+                    }
+                }
+                (Mode::Vscode, VSCODE_HANDLE_READY) if handle_sent && !open_triggered => {
+                    match live_source_allows_action(&sender, &source, request.mode) {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(()),
+                        Err(error) => {
+                            eprintln!("webview2 bridge: live Source failed: {error}");
+                            return Ok(());
+                        }
+                    }
+                    if let Err(error) = dispatch_ctrl_o(&sender) {
+                        eprintln!("webview2 bridge: Ctrl+O dispatch failed: {error}");
+                    } else {
+                        open_triggered = true;
+                    }
                 }
                 _ => {}
             }

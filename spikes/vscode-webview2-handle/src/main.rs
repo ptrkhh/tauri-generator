@@ -44,6 +44,7 @@ fn run(request: LaunchRequest) {
             };
             let window = WebviewWindowBuilder::new(app, "main", url)
                 .title("VS Code Handle Spike")
+                .initialization_script(include_str!("vscode.js"))
                 .build()?;
             webview2_bridge::install(&window, request.clone())?;
             Ok(())
