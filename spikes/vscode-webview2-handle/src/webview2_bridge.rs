@@ -296,6 +296,8 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                         &event_open_state,
                         "WebView2 event did not include sender and arguments",
                     );
+                } else {
+                    mark_probe_failed(&event_window, None);
                 }
                 return Ok(());
             };
@@ -420,6 +422,8 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
             eprintln!("webview2 bridge: add_WebMessageReceived failed: {error}");
             if mode == Mode::Probe {
                 mark_probe_failed(&failure_window, Some(&webview));
+            } else {
+                mark_vscode_failed(&failure_window, &open_state, error);
             }
         }
     })
