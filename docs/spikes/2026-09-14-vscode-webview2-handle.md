@@ -39,6 +39,18 @@ release: 1.97.0
 LLVM version: 22.1.6
 ```
 
+The Windows and WebView2 values were collected with:
+
+```text
+$programFilesX86 = [Environment]::GetFolderPath("ProgramFilesX86"); "OS=" + [Environment]::OSVersion.VersionString; "PROCESSOR_ARCHITECTURE=" + $env:PROCESSOR_ARCHITECTURE; $version = Get-ChildItem "$programFilesX86\Microsoft\EdgeWebView\Application" -Directory | Where-Object { $_.Name -match "^\d+(\.\d+){3}$" } | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty Name; "WEBVIEW2_RUNTIME=$version"
+```
+
+```text
+OS=Microsoft Windows NT 10.0.26200.0
+PROCESSOR_ARCHITECTURE=ARM64
+WEBVIEW2_RUNTIME=152.0.4191.66
+```
+
 ## Native probe
 
 The exact commit was built with the native x64 MSVC toolchain:
@@ -47,10 +59,10 @@ The exact commit was built with the native x64 MSVC toolchain:
 cmd.exe /d /c "call C:/Progra~2/MICROS~2/18/BuildTools/VC/Auxiliary/Build/vcvars64.bat && cd /d D:/git/pwa_ganerator/.worktrees/vscode-webview2-handle && C:/Users/p/.cargo/bin/rustup.exe run stable-x86_64-pc-windows-msvc cargo build -p vscode-webview2-handle-spike --target-dir D:/git/pwa_ganerator/.worktrees/vscode-webview2-handle/target/task4-final-x64"
 ```
 
-The probe invocation was:
+The probe file was created, run, and verified by this PowerShell command:
 
 ```text
-& 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug\vscode-webview2-handle-spike.exe' --probe "$env:TEMP\webwrap-probe-root.md"
+$probe = Join-Path $env:TEMP 'webwrap-vscode-task4-final-probe.txt'; Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue; [IO.File]::WriteAllText($probe, 'before', [Text.UTF8Encoding]::new($false)); $exe = 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug\vscode-webview2-handle-spike.exe'; $process = Start-Process -FilePath $exe -ArgumentList @('--probe', $probe) -PassThru; if (-not $process.WaitForExit(30000)) { Stop-Process -Id $process.Id -Force; throw 'probe did not complete' }; $hex = [BitConverter]::ToString([IO.File]::ReadAllBytes($probe)); $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $probe).Hash; "PASS probe bytes=$hex hash=$hash exit=$($process.ExitCode) path=$probe"; Remove-Item -LiteralPath $probe -Force
 ```
 
 The `--probe` executable run returned exit code `0` and wrote the exact expected bytes:
@@ -77,11 +89,10 @@ $p = Join-Path $env:TEMP 'webwrap-vscode-task4-final-writeback.md'
 [IO.File]::WriteAllText($p, "before`r`n", [Text.UTF8Encoding]::new($false))
 ```
 
-The exact executable was launched with a fresh WebView2 profile and a local CDP endpoint:
+The exact executable was launched with a deleted-then-fresh WebView2 profile and a local CDP endpoint:
 
 ```text
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9313'
-Start-Process -FilePath 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug\vscode-webview2-handle-spike.exe' -ArgumentList $p
+$port = 9306; $profile = Join-Path $env:TEMP 'webwrap-vscode-task4-final-profile'; Remove-Item -LiteralPath $profile -Recurse -Force -ErrorAction SilentlyContinue; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$port"; $env:WEBVIEW2_USER_DATA_FOLDER = $profile; $process = Start-Process -FilePath 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug\vscode-webview2-handle-spike.exe' -ArgumentList @($p) -PassThru -WorkingDirectory 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug'
 ```
 
 Phase 1 was observation only: the CDP script polled the visible tab/editor state until the supplied file appeared. It did not invoke `showOpenFilePicker`, press Ctrl+O, click a picker, change focus, or inject a second open action.
@@ -96,7 +107,27 @@ Automatic-open observation:
 }
 ```
 
-Phase 2 used the same CDP connection to click the already-open editor, replace its contents with `after` plus CRLF, verify the original file was still unchanged immediately before saving, and send exactly one trusted Ctrl+S key-down/key-up pair. A condition-based wait then polled the editor and filesystem until the original file contained the expected bytes. No dirty marker was exposed by this VS Code build before or after the edit, so this run does not claim a dirty-marker transition.
+Phase 2 used the same CDP connection while the already-open editor remained focused, replaced its contents with `after` plus CRLF, verified the original file was still unchanged immediately before saving, and sent exactly one trusted Ctrl+S key-down/key-up pair. A condition-based wait then polled the editor and filesystem until the original file contained the expected bytes. No dirty marker was exposed by this VS Code build before or after the edit, so this run does not claim a dirty-marker transition.
+
+The harness sent these CDP calls for the edit and save (with `Runtime.evaluate` state reads between phases):
+
+```text
+Input.dispatchKeyEvent({type: 'rawKeyDown', modifiers: 2, windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, key: 'a', code: 'KeyA'})
+Input.dispatchKeyEvent({type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, key: 'a', code: 'KeyA'})
+Input.insertText({text: 'after\r\n'})
+Runtime.evaluate({expression: STATE_EXPRESSION, returnByValue: true})
+Input.dispatchKeyEvent({type: 'rawKeyDown', modifiers: 2, windowsVirtualKeyCode: 83, nativeVirtualKeyCode: 83, key: 's', code: 'KeyS'})
+Input.dispatchKeyEvent({type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 83, nativeVirtualKeyCode: 83, key: 's', code: 'KeyS'})
+Runtime.evaluate({expression: STATE_EXPRESSION, returnByValue: true})
+```
+
+`STATE_EXPRESSION` was this read-only expression (the actual proof filename was substituted before evaluation):
+
+```javascript
+(()=>{const proofName='webwrap-vscode-task4-final-writeback.md';const tabs=[...document.querySelectorAll('.tab')];const tab=tabs.find(n=>n.textContent.includes(proofName));const dirtyNodes=[...document.querySelectorAll('*')].filter(n=>String(n.className).toLowerCase().includes('dirty')||String(n.getAttribute('aria-label')||'').toLowerCase().includes('dirty')||String(n.getAttribute('title')||'').toLowerCase().includes('dirty'));const dirty=!!tab&&(tab.classList.contains('dirty')||!!tab.querySelector('.codicon-close-dirty')||!!tab.querySelector('[aria-label*="dirty" i]')||dirtyNodes.some(n=>tab.contains(n))||document.title.startsWith('*'));return{title:document.title,href:location.href,focused:document.hasFocus(),lines:[...document.querySelectorAll('.view-lines .view-line')].map(n=>n.textContent),tab:tab?{className:tab.className,aria:tab.getAttribute('aria-label')}:null,dirty,dirtyNodes:dirtyNodes.slice(0,20).map(n=>({tag:n.tagName,className:String(n.className),aria:n.getAttribute('aria-label'),title:n.getAttribute('title')}))};})()
+```
+
+It performed no click, picker, or keyboard action. The initial observation reported `focused: true`, so the harness sent no separate focus click before the key events.
 
 The current VS Code WebView exposed no dirty class, dirty close icon, dirty ARIA label, or title marker either before or after the edit; this absence is recorded rather than inferred as a transition.
 
@@ -131,11 +162,10 @@ Downloads match count=0
 
 ## Wrong-origin fail-closed check
 
-To make the race-free check observable, a separate fresh profile used the proof file `%TEMP%\webwrap-vscode-origin-root.md` and started with `vscode.dev` mapped to `127.0.0.1`; the initial top-level URL remained `https://vscode.dev/` but no hosted workbench readiness message could fire. DevTools then navigated the top-level page to this data document:
+To make the race-free check observable, a separate deleted-then-fresh profile used the proof file `%TEMP%\webwrap-vscode-task4-final-origin.md` and started with `vscode.dev` mapped to `127.0.0.1`; the initial top-level URL remained `https://vscode.dev/` but no hosted workbench readiness message could fire. DevTools then navigated the top-level page to this data document:
 
 ```text
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9314'
-Start-Process -FilePath 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug\vscode-webview2-handle-spike.exe' -ArgumentList "$env:TEMP\webwrap-vscode-origin-root.md"
+$port = 9313; $proof = Join-Path $env:TEMP 'webwrap-vscode-task4-final-origin.md'; $profile = Join-Path $env:TEMP 'webwrap-vscode-task4-final-origin-profile-7'; Remove-Item -LiteralPath $proof -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $profile -Recurse -Force -ErrorAction SilentlyContinue; [IO.File]::WriteAllText($proof, ('before' + [Environment]::NewLine), [Text.UTF8Encoding]::new($false)); $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$port --host-resolver-rules=`"MAP vscode.dev 127.0.0.1`""; $env:WEBVIEW2_USER_DATA_FOLDER = $profile; $process = Start-Process -FilePath 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug\vscode-webview2-handle-spike.exe' -ArgumentList @($proof) -PassThru -WorkingDirectory 'D:\git\pwa_ganerator\.worktrees\vscode-webview2-handle\target\task4-final-x64\debug'
 
 data:text/html,<title>Wrong%20Origin%20Probe</title><p>wrong-origin</p>
 ```
@@ -159,11 +189,13 @@ After five seconds, page-side evidence was:
 }
 ```
 
-The exact hostile-origin CDP calls were:
+The exact hostile-origin CDP calls, including listener setup before any message emission, were:
 
 ```text
 Page.navigate({url: 'data:text/html,<title>Wrong%20Origin%20Probe</title><p>wrong-origin</p>'})
+Runtime.evaluate({expression: `(()=>{const bridge=window.chrome?.webview;window.__webwrapEvidence={messages:[],keydowns:[],bridge:!!bridge};window.addEventListener('keydown',event=>window.__webwrapEvidence.keydowns.push({key:event.key,code:event.code,ctrl:event.ctrlKey,shift:event.shiftKey,trusted:event.isTrusted}),true);if(bridge)bridge.addEventListener('message',event=>window.__webwrapEvidence.messages.push({data:event.data,objects:event.additionalObjects?.length||0}));return{bridge:!!bridge,href:location.href,origin:location.origin};})()`,returnByValue:true})
 Runtime.evaluate({expression: `["webwrap-vscode-ready","webwrap-vscode-handle-ready","webwrap-probe-ready","webwrap-probe-complete"].forEach(type => chrome.webview.postMessage(JSON.stringify({type})))`})
+Runtime.evaluate({expression: 'window.__webwrapEvidence',returnByValue:true})
 ```
 
 The observer then waited five seconds without sending keyboard input. Wrong-origin denial: **PASS**. No additional-object message (therefore no `FileSystemFileHandle`) and no trusted keyboard event, including Ctrl+O, was observed. The separate origin proof file remained `62-65-66-6F-72-65-0D-0A` with hash `A6456ED3BDE94789512C42C563637B929DA22B9B5611962BD2C8FF63343D8195`.
