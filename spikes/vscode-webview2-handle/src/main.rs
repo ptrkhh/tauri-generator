@@ -6,6 +6,8 @@ compile_error!("the vscode WebView2 spike must be built and run on Windows");
 use std::{ffi::OsString, fs, path::PathBuf};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
+mod webview2_bridge;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Probe,
@@ -40,9 +42,10 @@ fn run(request: LaunchRequest) {
                 Mode::Probe => WebviewUrl::App("probe.html".into()),
                 Mode::Vscode => WebviewUrl::External("https://vscode.dev/".parse().unwrap()),
             };
-            WebviewWindowBuilder::new(app, "main", url)
+            let window = WebviewWindowBuilder::new(app, "main", url)
                 .title("VS Code Handle Spike")
                 .build()?;
+            webview2_bridge::install(&window, request.clone())?;
             Ok(())
         })
         .run(tauri::generate_context!())
