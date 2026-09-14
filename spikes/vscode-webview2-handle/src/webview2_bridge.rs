@@ -101,22 +101,49 @@ unsafe fn post_file_handle(
         )
 }
 
-unsafe fn dispatch_ctrl_o(webview: &ICoreWebView2) -> windows::core::Result<()> {
-    let down = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
-    webview.CallDevToolsProtocolMethod(
+unsafe fn call_devtools(
+    webview: &ICoreWebView2,
+    method: PCWSTR,
+    parameters: PCWSTR,
+) -> windows::core::Result<()> {
+    let completed =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
+    webview.CallDevToolsProtocolMethod(method, parameters, &completed)
+}
+
+unsafe fn dispatch_open_file(webview: &ICoreWebView2) -> windows::core::Result<()> {
+    call_devtools(
+        webview,
         windows::core::w!("Input.dispatchKeyEvent"),
         windows::core::w!(
-            r#"{"type":"rawKeyDown","modifiers":2,"windowsVirtualKeyCode":79,"nativeVirtualKeyCode":79,"key":"o","code":"KeyO"}"#
+            r#"{"type":"rawKeyDown","modifiers":10,"windowsVirtualKeyCode":80,"nativeVirtualKeyCode":80,"key":"p","code":"KeyP"}"#
         ),
-        &down,
     )?;
-    let up = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
-    webview.CallDevToolsProtocolMethod(
+    call_devtools(
+        webview,
         windows::core::w!("Input.dispatchKeyEvent"),
         windows::core::w!(
-            r#"{"type":"keyUp","modifiers":2,"windowsVirtualKeyCode":79,"nativeVirtualKeyCode":79,"key":"o","code":"KeyO"}"#
+            r#"{"type":"keyUp","modifiers":10,"windowsVirtualKeyCode":80,"nativeVirtualKeyCode":80,"key":"p","code":"KeyP"}"#
         ),
-        &up,
+    )?;
+    call_devtools(
+        webview,
+        windows::core::w!("Input.insertText"),
+        windows::core::w!(r#"{"text":"Open File..."}"#),
+    )?;
+    call_devtools(
+        webview,
+        windows::core::w!("Input.dispatchKeyEvent"),
+        windows::core::w!(
+            r#"{"type":"rawKeyDown","modifiers":0,"windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"key":"Enter","code":"Enter"}"#
+        ),
+    )?;
+    call_devtools(
+        webview,
+        windows::core::w!("Input.dispatchKeyEvent"),
+        windows::core::w!(
+            r#"{"type":"keyUp","modifiers":0,"windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"key":"Enter","code":"Enter"}"#
+        ),
     )
 }
 
@@ -227,8 +254,8 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                             return Ok(());
                         }
                     }
-                    if let Err(error) = dispatch_ctrl_o(&sender) {
-                        eprintln!("webview2 bridge: Ctrl+O dispatch failed: {error}");
+                    if let Err(error) = dispatch_open_file(&sender) {
+                        eprintln!("webview2 bridge: Open File dispatch failed: {error}");
                     } else {
                         open_triggered = true;
                     }
