@@ -11,6 +11,16 @@
   announce();
 
   bridge.addEventListener("message", async (event) => {
+    if (
+      event.data?.type === "webwrap-error" &&
+      event.data?.message === "Native bridge failed" &&
+      Object.keys(event.data).length === 2
+    ) {
+      clearInterval(timer);
+      status.textContent = "FAIL: Native bridge failed";
+      document.title = "FAIL";
+      return;
+    }
     if (event.data?.type !== "webwrap-file") return;
     const handle = event.additionalObjects?.[0];
     if (!(handle instanceof FileSystemFileHandle)) {

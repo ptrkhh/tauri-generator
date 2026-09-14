@@ -43,6 +43,37 @@ fn source_is_allowed(source: &str, mode: Mode) -> bool {
     }
 }
 
+fn sources_allow_action(event_source: &str, live_source: &str, mode: Mode) -> bool {
+    source_is_allowed(event_source, mode) && source_is_allowed(live_source, mode)
+}
+
+unsafe fn live_source_allows_action(
+    sender: &ICoreWebView2,
+    event_source: &str,
+    mode: Mode,
+) -> windows::core::Result<bool> {
+    let mut live_source = PWSTR::null();
+    sender.Source(&mut live_source)?;
+    Ok(sources_allow_action(
+        event_source,
+        &take_pwstr(live_source),
+        mode,
+    ))
+}
+
+unsafe fn mark_probe_failed(window: &tauri::WebviewWindow, webview: Option<&ICoreWebView2>) {
+    if let Some(webview) = webview {
+        if let Err(error) = webview.PostWebMessageAsJson(windows::core::w!(
+            r#"{"type":"webwrap-error","message":"Native bridge failed"}"#
+        )) {
+            eprintln!("webview2 bridge: error message delivery failed: {error}");
+        }
+    }
+    if let Err(error) = window.set_title("FAIL: Native bridge failed") {
+        eprintln!("webview2 bridge: failure title update failed: {error}");
+    }
+}
+
 unsafe fn post_file_handle(
     environment: &ICoreWebView2Environment,
     webview: &ICoreWebView2,
@@ -70,21 +101,26 @@ unsafe fn post_file_handle(
 
 pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::Result<()> {
     let app_handle = window.app_handle().clone();
+    let failure_window = window.clone();
     window.with_webview(move |platform| unsafe {
         let environment = platform.environment();
         let webview = match platform.controller().CoreWebView2() {
             Ok(webview) => webview,
             Err(error) => {
                 eprintln!("webview2 bridge: CoreWebView2 unavailable: {error}");
+                if request.mode == Mode::Probe {
+                    mark_probe_failed(&failure_window, None);
+                }
                 return;
             }
         };
         let delivery_environment = environment.clone();
-        let delivery_webview = webview.clone();
+        let mode = request.mode;
+        let event_window = failure_window.clone();
         let mut handle_sent = false;
         let mut open_triggered = false;
-        let handler = WebMessageReceivedEventHandler::create(Box::new(move |_sender, args| {
-            let Some(args) = args else {
+        let handler = WebMessageReceivedEventHandler::create(Box::new(move |sender, args| {
+            let (Some(sender), Some(args)) = (sender, args) else {
                 return Ok(());
             };
 
@@ -110,15 +146,30 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
 
             match (request.mode, message) {
                 (Mode::Probe, PROBE_READY) if !handle_sent => {
+                    match live_source_allows_action(&sender, &source, request.mode) {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(()),
+                        Err(error) => {
+                            eprintln!("webview2 bridge: live Source failed: {error}");
+                            return Ok(());
+                        }
+                    }
                     if let Err(error) =
-                        post_file_handle(&delivery_environment, &delivery_webview, &request.path)
+                        post_file_handle(&delivery_environment, &sender, &request.path)
                     {
                         eprintln!("webview2 bridge: handle delivery failed: {error}");
+                        mark_probe_failed(&event_window, Some(&sender));
                     } else {
                         handle_sent = true;
                     }
                 }
-                (Mode::Probe, PROBE_COMPLETE) if handle_sent => app_handle.exit(0),
+                (Mode::Probe, PROBE_COMPLETE) if handle_sent => {
+                    match live_source_allows_action(&sender, &source, request.mode) {
+                        Ok(true) => app_handle.exit(0),
+                        Ok(false) => {}
+                        Err(error) => eprintln!("webview2 bridge: live Source failed: {error}"),
+                    }
+                }
                 (Mode::Vscode, VSCODE_READY | VSCODE_HANDLE_READY) => {
                     // Task 3 replaces this no-op with Ctrl+O and handle delivery.
                     let _ = &mut open_triggered;
@@ -130,6 +181,9 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
         let mut token = 0;
         if let Err(error) = webview.add_WebMessageReceived(&handler, &mut token) {
             eprintln!("webview2 bridge: add_WebMessageReceived failed: {error}");
+            if mode == Mode::Probe {
+                mark_probe_failed(&failure_window, Some(&webview));
+            }
         }
     })
 }
@@ -137,8 +191,8 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_message, source_is_allowed, PROBE_COMPLETE, PROBE_READY, VSCODE_HANDLE_READY,
-        VSCODE_READY,
+        decode_message, source_is_allowed, sources_allow_action, PROBE_COMPLETE, PROBE_READY,
+        VSCODE_HANDLE_READY, VSCODE_READY,
     };
     use crate::Mode;
 
@@ -185,5 +239,24 @@ mod tests {
         ] {
             assert_eq!(decode_message(rejected), None);
         }
+    }
+
+    #[test]
+    fn action_requires_event_and_live_sources() {
+        assert!(sources_allow_action(
+            "http://tauri.localhost/probe.html",
+            "http://tauri.localhost/probe.html",
+            Mode::Probe
+        ));
+        assert!(!sources_allow_action(
+            "http://tauri.localhost/probe.html",
+            "https://evil.test/",
+            Mode::Probe
+        ));
+        assert!(!sources_allow_action(
+            "https://evil.test/",
+            "http://tauri.localhost/probe.html",
+            Mode::Probe
+        ));
     }
 }
