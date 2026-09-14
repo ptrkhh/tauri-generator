@@ -33,6 +33,7 @@ This plan covers only the release-blocking vscode.dev feasibility spike. It excl
 - Create: spikes/vscode-webview2-handle/Cargo.toml — pinned spike dependencies.
 - Create: spikes/vscode-webview2-handle/build.rs — Tauri build hook.
 - Create: spikes/vscode-webview2-handle/tauri.conf.json — no default window, bundling, commands, or capabilities.
+- Create: spikes/vscode-webview2-handle/icons/icon.png — static source icon required by Tauri's context macro.
 - Create: spikes/vscode-webview2-handle/src/main.rs — path validation and window creation.
 - Create: spikes/vscode-webview2-handle/src/webview2_bridge.rs — origin checks, COM handle delivery, and Ctrl+O dispatch.
 - Create: spikes/vscode-webview2-handle/src/vscode.js — top-frame picker adapter and readiness handshake.
@@ -51,6 +52,7 @@ This plan covers only the release-blocking vscode.dev feasibility spike. It excl
 - Create: spikes/vscode-webview2-handle/Cargo.toml
 - Create: spikes/vscode-webview2-handle/build.rs
 - Create: spikes/vscode-webview2-handle/tauri.conf.json
+- Create: spikes/vscode-webview2-handle/icons/icon.png
 - Create: spikes/vscode-webview2-handle/src/main.rs
 - Create: spikes/vscode-webview2-handle/ui/probe.html
 
@@ -119,6 +121,8 @@ Create ui/probe.html as a minimal asset so Tauri's frontendDist exists while the
 ~~~html
 <!doctype html><meta charset="utf-8"><title>Spike</title>
 ~~~
+
+Add a small valid static PNG at icons/icon.png. It is only the development spike icon; the production generator later replaces embedded icons during packaging.
 
 - [ ] **Step 3: Write failing argument tests**
 
