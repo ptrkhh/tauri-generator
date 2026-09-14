@@ -93,8 +93,15 @@ fn mark_vscode_failed(
     open_state: &AtomicU8,
     reason: impl std::fmt::Display,
 ) {
-    if open_state.swap(OPEN_FAILED, Ordering::AcqRel) == OPEN_FAILED {
-        return;
+    let mut state = open_state.load(Ordering::Acquire);
+    loop {
+        if matches!(state, OPEN_COMPLETED | OPEN_FAILED) {
+            return;
+        }
+        match open_state.compare_exchange(state, OPEN_FAILED, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => break,
+            Err(next) => state = next,
+        }
     }
     eprintln!("webview2 bridge: VS Code open failed: {reason}");
     if let Err(error) = window.set_title("FAIL: Native bridge failed") {
