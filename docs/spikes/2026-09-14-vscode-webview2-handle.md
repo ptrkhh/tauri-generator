@@ -21,7 +21,9 @@ This is a measured feasibility spike only. It does not implement file associatio
 
 Rust and the executable were built with the native x64 MSVC toolchain on the ARM64 Windows host. WSL only invoked commands and inspected results; it was not used as the GUI build/runtime.
 
-The toolchain identity was collected in the same native developer prompt with:
+The commit identity was collected with `git rev-parse HEAD` (output:
+`34e5f6aa0165f4ed722a391fa320414ed148df10`). The toolchain identity was
+collected in the same native developer prompt with:
 
 ```text
 cmd.exe /d /c "call C:/Progra~2/MICROS~2/18/BuildTools/VC/Auxiliary/Build/vcvars64.bat && C:/Users/p/.cargo/bin/rustup.exe run stable-x86_64-pc-windows-msvc rustc -Vv"
@@ -195,10 +197,12 @@ The exact hostile-origin CDP calls, including listener setup before any message 
 Page.navigate({url: 'data:text/html,<title>Wrong%20Origin%20Probe</title><p>wrong-origin</p>'})
 Runtime.evaluate({expression: `(()=>{const bridge=window.chrome?.webview;window.__webwrapEvidence={messages:[],keydowns:[],bridge:!!bridge};window.addEventListener('keydown',event=>window.__webwrapEvidence.keydowns.push({key:event.key,code:event.code,ctrl:event.ctrlKey,shift:event.shiftKey,trusted:event.isTrusted}),true);if(bridge)bridge.addEventListener('message',event=>window.__webwrapEvidence.messages.push({data:event.data,objects:event.additionalObjects?.length||0}));return{bridge:!!bridge,href:location.href,origin:location.origin};})()`,returnByValue:true})
 Runtime.evaluate({expression: `["webwrap-vscode-ready","webwrap-vscode-handle-ready","webwrap-probe-ready","webwrap-probe-complete"].forEach(type => chrome.webview.postMessage(JSON.stringify({type})))`})
+// wait five seconds
+await sleep(5000)
 Runtime.evaluate({expression: 'window.__webwrapEvidence',returnByValue:true})
 ```
 
-The observer then waited five seconds without sending keyboard input. Wrong-origin denial: **PASS**. No additional-object message (therefore no `FileSystemFileHandle`) and no trusted keyboard event, including Ctrl+O, was observed. The separate origin proof file remained `62-65-66-6F-72-65-0D-0A` with hash `A6456ED3BDE94789512C42C563637B929DA22B9B5611962BD2C8FF63343D8195`.
+The observer sent no keyboard input during the five-second wait. Wrong-origin denial: **PASS**. No additional-object message (therefore no `FileSystemFileHandle`) and no trusted keyboard event, including Ctrl+O, was observed. The separate origin proof file remained `62-65-66-6F-72-65-0D-0A` with hash `A6456ED3BDE94789512C42C563637B929DA22B9B5611962BD2C8FF63343D8195`.
 
 An earlier exploratory hostile-origin run showed that synchronously changing the Tauri title from the WebView2 message callback stalled CDP. Commit `34e5f6a` removes that callback-side UI mutation: the disallowed source is logged and returned before any handle or input state is touched. The final hostile-origin run completed without that stall or any COM error.
 
