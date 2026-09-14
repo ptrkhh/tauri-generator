@@ -101,50 +101,70 @@ unsafe fn post_file_handle(
         )
 }
 
-unsafe fn call_devtools(
-    webview: &ICoreWebView2,
-    method: PCWSTR,
-    parameters: PCWSTR,
+unsafe fn dispatch_open_file_step(
+    webview: ICoreWebView2,
+    step: usize,
 ) -> windows::core::Result<()> {
+    let (method, parameters) = match step {
+        0 => (
+            windows::core::w!("Input.dispatchKeyEvent"),
+            windows::core::w!(
+                r#"{"type":"rawKeyDown","modifiers":10,"windowsVirtualKeyCode":80,"nativeVirtualKeyCode":80,"key":"p","code":"KeyP"}"#
+            ),
+        ),
+        1 => (
+            windows::core::w!("Input.dispatchKeyEvent"),
+            windows::core::w!(
+                r#"{"type":"keyUp","modifiers":10,"windowsVirtualKeyCode":80,"nativeVirtualKeyCode":80,"key":"p","code":"KeyP"}"#
+            ),
+        ),
+        2 => (
+            windows::core::w!("Input.insertText"),
+            windows::core::w!(r#"{"text":"Open File..."}"#),
+        ),
+        3 => (
+            windows::core::w!("Runtime.evaluate"),
+            windows::core::w!(
+                r#"{"expression":"new Promise(resolve=>{const deadline=performance.now()+5000;const ready=()=>{const active=document.activeElement;const selected=document.getElementById(active?.getAttribute('aria-activedescendant'));if(active?.value?.endsWith('Open File...')&&selected?.textContent?.includes('Open File...'))resolve(true);else if(performance.now()>=deadline)resolve(false);else requestAnimationFrame(ready)};ready()})","awaitPromise":true,"returnByValue":true}"#
+            ),
+        ),
+        4 => (
+            windows::core::w!("Input.dispatchKeyEvent"),
+            windows::core::w!(
+                r#"{"type":"rawKeyDown","modifiers":0,"windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"key":"Enter","code":"Enter"}"#
+            ),
+        ),
+        5 => (
+            windows::core::w!("Input.dispatchKeyEvent"),
+            windows::core::w!(
+                r#"{"type":"keyUp","modifiers":0,"windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"key":"Enter","code":"Enter"}"#
+            ),
+        ),
+        _ => return Ok(()),
+    };
+    let next_webview = webview.clone();
     let completed =
-        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |status, response| {
+            let result = status.and_then(|_| {
+                if step == 3 && !response.contains(r#""value":true"#) {
+                    eprintln!("webview2 bridge: Open File command did not become ready");
+                    return Ok(());
+                }
+                unsafe { dispatch_open_file_step(next_webview, step + 1) }
+            });
+            if let Err(error) = &result {
+                eprintln!(
+                    "webview2 bridge: Open File dispatch step {} failed: {error}",
+                    step + 1
+                );
+            }
+            result
+        }));
     webview.CallDevToolsProtocolMethod(method, parameters, &completed)
 }
 
 unsafe fn dispatch_open_file(webview: &ICoreWebView2) -> windows::core::Result<()> {
-    call_devtools(
-        webview,
-        windows::core::w!("Input.dispatchKeyEvent"),
-        windows::core::w!(
-            r#"{"type":"rawKeyDown","modifiers":10,"windowsVirtualKeyCode":80,"nativeVirtualKeyCode":80,"key":"p","code":"KeyP"}"#
-        ),
-    )?;
-    call_devtools(
-        webview,
-        windows::core::w!("Input.dispatchKeyEvent"),
-        windows::core::w!(
-            r#"{"type":"keyUp","modifiers":10,"windowsVirtualKeyCode":80,"nativeVirtualKeyCode":80,"key":"p","code":"KeyP"}"#
-        ),
-    )?;
-    call_devtools(
-        webview,
-        windows::core::w!("Input.insertText"),
-        windows::core::w!(r#"{"text":"Open File..."}"#),
-    )?;
-    call_devtools(
-        webview,
-        windows::core::w!("Input.dispatchKeyEvent"),
-        windows::core::w!(
-            r#"{"type":"rawKeyDown","modifiers":0,"windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"key":"Enter","code":"Enter"}"#
-        ),
-    )?;
-    call_devtools(
-        webview,
-        windows::core::w!("Input.dispatchKeyEvent"),
-        windows::core::w!(
-            r#"{"type":"keyUp","modifiers":0,"windowsVirtualKeyCode":13,"nativeVirtualKeyCode":13,"key":"Enter","code":"Enter"}"#
-        ),
-    )
+    dispatch_open_file_step(webview.clone(), 0)
 }
 
 pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::Result<()> {
