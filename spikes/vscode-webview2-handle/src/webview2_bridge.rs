@@ -328,11 +328,7 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
             let source = take_pwstr(source);
             if !source_is_allowed(&source, request.mode) {
                 if request.mode == Mode::Vscode {
-                    mark_vscode_failed(
-                        &event_window,
-                        &event_open_state,
-                        "event source is not an allowed vscode.dev origin",
-                    );
+                    eprintln!("webview2 bridge: rejected message from disallowed source: {source}");
                 }
                 return Ok(());
             }
