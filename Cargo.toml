@@ -1,0 +1,3 @@
+[workspace]
+members = ["spikes/vscode-webview2-handle"]
+resolver = "2"
