@@ -36,7 +36,7 @@ This plan covers only the release-blocking vscode.dev feasibility spike. It excl
 - Create: spikes/vscode-webview2-handle/src/main.rs — path validation and window creation.
 - Create: spikes/vscode-webview2-handle/src/webview2_bridge.rs — origin checks, COM handle delivery, and Ctrl+O dispatch.
 - Create: spikes/vscode-webview2-handle/src/vscode.js — top-frame picker adapter and readiness handshake.
-- Create: spikes/vscode-webview2-handle/ui/probe.html — local write-through probe.
+- Create/modify: spikes/vscode-webview2-handle/ui/probe.html — local write-through probe.
 - Create after measurement: docs/spikes/2026-09-14-vscode-webview2-handle.md — pass/fail evidence.
 
 ---
@@ -52,6 +52,7 @@ This plan covers only the release-blocking vscode.dev feasibility spike. It excl
 - Create: spikes/vscode-webview2-handle/build.rs
 - Create: spikes/vscode-webview2-handle/tauri.conf.json
 - Create: spikes/vscode-webview2-handle/src/main.rs
+- Create: spikes/vscode-webview2-handle/ui/probe.html
 
 - [ ] **Step 1: Add workspace files**
 
@@ -111,6 +112,12 @@ fn main() {
   "app": { "withGlobalTauri": false, "windows": [] },
   "bundle": { "active": false }
 }
+~~~
+
+Create ui/probe.html as a minimal asset so Tauri's frontendDist exists while the crate is first compiled:
+
+~~~html
+<!doctype html><meta charset="utf-8"><title>Spike</title>
 ~~~
 
 - [ ] **Step 3: Write failing argument tests**
@@ -398,19 +405,7 @@ In probe mode:
 
 Ignore malformed, unknown, wrong-mode, and wrong-origin messages. Log COM failures to stderr and leave the window open showing failure. Never loosen the origin check.
 
-Finish main-window setup with:
-
-~~~rust
-let builder = WebviewWindowBuilder::new(app, "main", url)
-    .title("VS Code Handle Spike");
-let builder = if request.mode == Mode::Vscode {
-    builder.initialization_script(include_str!("vscode.js"))
-} else {
-    builder
-};
-let window = builder.build()?;
-webview2_bridge::install(&window, request.clone())?;
-~~~
+Keep the Task 1 window builder, then call webview2_bridge::install(&window, request.clone()) after build. Task 3 adds the vscode.js initialization script to this builder; do not reference that file before Task 3 creates it.
 
 - [ ] **Step 6: Run the native probe**
 
@@ -441,6 +436,7 @@ git commit -m "spike: prove WebView2 handle transfer"
 **Files:**
 
 - Create: spikes/vscode-webview2-handle/src/vscode.js
+- Modify: spikes/vscode-webview2-handle/src/main.rs
 - Modify: spikes/vscode-webview2-handle/src/webview2_bridge.rs
 
 - [ ] **Step 1: Add the top-frame picker adapter**
