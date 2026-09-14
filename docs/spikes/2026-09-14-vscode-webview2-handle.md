@@ -1,0 +1,148 @@
+# vscode.dev writable-handle spike
+
+Date: 2026-09-14
+
+## Result
+
+**PASS — gate satisfied.** The exact tested executable automatically opened the supplied local Markdown file in `vscode.dev`; one trusted Ctrl+S changed the original file bytes, and the hostile-origin check delivered neither a native handle nor input events.
+
+This is a measured feasibility spike only. It does not implement file associations, packaging, Photopea, Android, custom DNS, or the generator UI.
+
+## Exact environment
+
+- Git commit tested: `34e5f6aa0165f4ed722a391fa320414ed148df10`
+- Rust: `rustc 1.97.0 (2d8144b78 2026-07-07)`
+- Rust host/target: `x86_64-pc-windows-msvc`
+- Rust LLVM: `22.1.6`
+- Windows: `Microsoft Windows NT 10.0.26200.0`
+- Windows architecture: `ARM64`
+- WebView2 runtime: `152.0.4191.66`
+- Build output: `target/task4-final-x64/debug/vscode-webview2-handle-spike.exe`
+
+Rust and the executable were built with the native x64 MSVC toolchain on the ARM64 Windows host. WSL only invoked commands and inspected results; it was not used as the GUI build/runtime.
+
+## Native probe
+
+The exact commit was built with the native x64 MSVC toolchain:
+
+```text
+cmd.exe /d /c "call C:/Progra~2/MICROS~2/18/BuildTools/VC/Auxiliary/Build/vcvars64.bat && cd /d D:/git/pwa_ganerator/.worktrees/vscode-webview2-handle && C:/Users/p/.cargo/bin/rustup.exe run stable-x86_64-pc-windows-msvc cargo build -p vscode-webview2-handle-spike --target-dir D:/git/pwa_ganerator/.worktrees/vscode-webview2-handle/target/task4-final-x64"
+```
+
+The `--probe` executable run returned exit code `0` and wrote the exact expected bytes:
+
+```text
+PASS bytes=77-65-62-77-72-61-70-2D-70-72-6F-62-65-2D-6F-6B-0A hash=C875C7515E18F31EDFDE5BC46ABEAA4D94FED7748B344AF6D3797EFF2561100F exit=0
+```
+
+Native probe: **PASS**.
+
+## Automatic open and Ctrl+S write-back
+
+Fresh proof file:
+
+- Path: `%TEMP%\webwrap-vscode-task4-final-writeback.md`
+- Contents: UTF-8 without BOM, `before` plus Windows CRLF
+- Before hash: `A6456ED3BDE94789512C42C563637B929DA22B9B5611962BD2C8FF63343D8195`
+- Before bytes: `62-65-66-6F-72-65-0D-0A`
+
+The exact executable ran with a fresh WebView2 profile and a local CDP endpoint. The observer only polled the visible tab/editor state. It did not invoke `showOpenFilePicker`, press Ctrl+O, click a picker, change focus, or inject a second open action.
+
+Automatic-open observation:
+
+```json
+{
+  "href": "https://vscode.dev/",
+  "tab": "webwrap-vscode-task4-final-writeback.md",
+  "lines": ["before", ""]
+}
+```
+
+The observer replaced the editor contents with `after` plus CRLF, verified the original file was still unchanged immediately before saving, then sent exactly one trusted Ctrl+S key-down/key-up pair. The condition-based wait ended when the observed dirty state was false and the original file contained the expected bytes.
+
+The current VS Code WebView exposed no dirty class, dirty close icon, dirty ARIA label, or title marker either before or after the edit; this absence is recorded rather than inferred as a transition.
+
+Automatic open: **PASS**. Ctrl+S original-file write-back: **PASS**.
+
+- Before-save hash: `A6456ED3BDE94789512C42C563637B929DA22B9B5611962BD2C8FF63343D8195` (unchanged)
+- After hash: `1235F8F435B1D16F7AAC442351F2E29FF1BD2B74652392C4ACCB5EC5565973DA`
+- After bytes: `61-66-74-65-72-0D-0A`
+- After text: `after<CR><LF>`
+- Hash and bytes were identical after the wrapper process was closed.
+- Wrapper process count after close: `0`.
+- `%USERPROFILE%\Downloads\webwrap-vscode-task4-final-writeback.md`: did not exist.
+
+An independent exact-head rerun used `%TEMP%\webwrap-vscode-task4-root2.md`
+with a fresh WebView2 profile. It automatically opened the proof tab, changed
+`before` to `after`, sent one trusted Ctrl+S key-down/key-up pair, and observed
+the saved state. The original-file result was:
+
+```text
+before bytes=62-65-66-6F-72-65-0D-0A
+after bytes=61-66-74-65-72-0D-0A
+after hash=1235F8F435B1D16F7AAC442351F2E29FF1BD2B74652392C4ACCB5EC5565973DA
+Downloads match count=0
+```
+
+## Wrong-origin fail-closed check
+
+To make the race-free check observable, a fresh profile started with `vscode.dev` mapped to `127.0.0.1`; the initial top-level URL remained `https://vscode.dev/` but no hosted workbench readiness message could fire. DevTools then navigated the top-level page to this data document:
+
+```text
+data:text/html,<title>Wrong%20Origin%20Probe</title><p>wrong-origin</p>
+```
+
+The page reported `origin: "null"` and `chrome.webview: true`. From that document's console context, the test emitted every recognized bridge message as a JSON-string post:
+
+```text
+webwrap-vscode-ready
+webwrap-vscode-handle-ready
+webwrap-probe-ready
+webwrap-probe-complete
+```
+
+After five seconds, page-side evidence was:
+
+```json
+{
+  "messages": [],
+  "keydowns": [],
+  "bridge": true
+}
+```
+
+Wrong-origin denial: **PASS**. No additional-object message (therefore no `FileSystemFileHandle`) and no trusted keyboard event, including Ctrl+O, was observed. The proof file remained `62-65-66-6F-72-65-0D-0A` with hash `A6456ED3BDE94789512C42C563637B929DA22B9B5611962BD2C8FF63343D8195`.
+
+An earlier exploratory hostile-origin run showed that synchronously changing the Tauri title from the WebView2 message callback stalled CDP. Commit `34e5f6a` removes that callback-side UI mutation: the disallowed source is logged and returned before any handle or input state is touched. The final hostile-origin run completed without that stall or any COM error.
+
+## Static verification
+
+Native x64 MSVC checks for the exact source returned:
+
+```text
+cargo test -p vscode-webview2-handle-spike
+test result: ok. 7 passed; 0 failed
+
+cargo fmt --all -- --check
+cargo clippy -p vscode-webview2-handle-spike --all-targets -- -D warnings
+node --check spikes/vscode-webview2-handle/src/vscode.js
+git diff --check
+```
+
+Formatting, Clippy, JavaScript syntax, and diff checks exited `0` with no
+diagnostic output. The final workspace run after adding this report used an
+isolated x64 target directory:
+
+```text
+cargo test --workspace --target-dir target/final-x64
+test result: ok. 7 passed; 0 failed
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --target-dir target/final-x64 -- -D warnings
+Finished `dev` profile [unoptimized + debuginfo]
+node --check spikes/vscode-webview2-handle/src/vscode.js
+git diff --check
+```
+
+## Conclusion
+
+The vscode.dev feasibility gate is satisfied for this measured WebView2 runtime: a genuine writable handle reaches the web app, the file opens automatically, and Ctrl+S writes the original local file without a Downloads replacement. The implementation remains a spike; product/generator work should use a separate plan.
