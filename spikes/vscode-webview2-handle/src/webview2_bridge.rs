@@ -127,6 +127,9 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
             let mut message = PWSTR::null();
             if let Err(error) = args.WebMessageAsJson(&mut message) {
                 eprintln!("webview2 bridge: WebMessageAsJson failed: {error}");
+                if request.mode == Mode::Probe {
+                    mark_probe_failed(&event_window, Some(&sender));
+                }
                 return Ok(());
             }
             let message = take_pwstr(message);
@@ -137,6 +140,9 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
             let mut source = PWSTR::null();
             if let Err(error) = args.Source(&mut source) {
                 eprintln!("webview2 bridge: Source failed: {error}");
+                if request.mode == Mode::Probe {
+                    mark_probe_failed(&event_window, Some(&sender));
+                }
                 return Ok(());
             }
             let source = take_pwstr(source);
@@ -151,6 +157,7 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                         Ok(false) => return Ok(()),
                         Err(error) => {
                             eprintln!("webview2 bridge: live Source failed: {error}");
+                            mark_probe_failed(&event_window, Some(&sender));
                             return Ok(());
                         }
                     }
@@ -167,7 +174,10 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
                     match live_source_allows_action(&sender, &source, request.mode) {
                         Ok(true) => app_handle.exit(0),
                         Ok(false) => {}
-                        Err(error) => eprintln!("webview2 bridge: live Source failed: {error}"),
+                        Err(error) => {
+                            eprintln!("webview2 bridge: live Source failed: {error}");
+                            mark_probe_failed(&event_window, Some(&sender));
+                        }
                     }
                 }
                 (Mode::Vscode, VSCODE_READY | VSCODE_HANDLE_READY) => {
