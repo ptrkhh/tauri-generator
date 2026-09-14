@@ -34,6 +34,7 @@ The generated applications are website wrappers, not offline mirrors. They still
 
 - A hosted multi-user generator.
 - macOS or Linux output.
+- Plain HTTP website targets; v1 accepts HTTPS launch URLs only.
 - Windows code signing or store submission.
 - Google Play publishing or managed signing.
 - Offline copies of arbitrary websites.
@@ -83,6 +84,7 @@ The specification is an internal format. Users interact with fields in the gener
 The generator canonicalizes a URL before deriving app identity:
 
 - add `https://` when no scheme is supplied
+- reject schemes other than `https` in v1
 - lowercase the hostname
 - remove the default port
 - normalize an empty path to `/`
@@ -91,6 +93,8 @@ The generator canonicalizes a URL before deriving app identity:
 A stable hash of the canonical URL forms the app identity. The visible name and icon may change without changing identity. Different canonical URLs get different identities.
 
 On Android, the identity becomes a valid unique application ID such as `app.webwrap.a<hash>`. The package namespace of the precompiled runtime remains fixed; Android's `applicationId` varies per generated app. On Windows, the same identity determines the application user model ID and persistent data directory.
+
+Runtime services that require uniqueness also use the embedded identity. In particular, Windows single-instance discovery uses an identity-derived mutex and IPC endpoint rather than Tauri's compile-time bundle identifier; otherwise every generated executable would be treated as the same application. The endpoint is scoped to the current Windows user and carries versioned, length-prefixed structured messages. It rejects the wrong app identity, oversized or malformed payloads, and invalid file counts before canonicalizing and forwarding paths.
 
 ## Windows artifact generation
 
@@ -107,7 +111,7 @@ The wrapper reads configuration from its own executable resources. It has no adj
 
 The file is portable before association registration. On first launch, it offers to register its configured types for the current user and appear in Windows **Open with**. Windows controls default-application selection; the wrapper will not attempt to bypass that policy. Moving the executable after registration may require registering it again.
 
-One running app instance accepts subsequent OS-open requests, allowing another double-click to open a file without creating a conflicting instance.
+One running instance per embedded app identity accepts subsequent OS-open requests. The identity-derived IPC endpoint validates the complete request before forwarding it, allowing another double-click to open a file without creating a conflicting instance while unrelated generated apps continue running independently.
 
 ## Android artifact generation
 
@@ -125,7 +129,7 @@ For each application, the generator:
 
 1. Creates a temporary project from the packaging template.
 2. Writes the embedded app specification.
-3. Sets the unique application ID, label, and monotonically increasing version code.
+3. Sets the unique application ID, label, and a durably reserved monotonically increasing version code.
 4. Generates icon resources and file-association intent filters.
 5. Packages the precompiled wrapper code and resources.
 6. Signs with the generator's persistent local key.
@@ -136,9 +140,9 @@ Android identifies applications by embedded application ID, not filename. Theref
 
 ### Signing-key lifecycle
 
-The generator creates one persistent signing key automatically and protects it in its application-data directory. The UI provides an explicit export/backup action.
+The generator creates one persistent signing key automatically and protects it in its application-data directory. Alongside it, the generator stores the highest reserved version code per app identity. A version code is reserved durably before signing and is never reused during normal operation; gaps after interrupted builds are harmless. The UI's explicit export/backup action includes both the key and version-code state, and restore is transactional.
 
-Loss of the signing key means a regenerated APK cannot update an already installed copy; Android would require uninstalling the old app first. Build errors must never cause key rotation.
+Loss of the signing key means a regenerated APK cannot update an already installed copy; Android would require uninstalling the old app first. Any restored backup may be stale even when it contains version-code state. Restore therefore marks existing app identities as having an unverified version floor and blocks update-capable generation until the installed app or latest APK is inspected, or the user supplies a known installed version code. The next code is reserved above that verified floor. Build errors must never cause key rotation or version-code reuse.
 
 ## Generator experience
 
@@ -202,6 +206,7 @@ Changing the display name does not move or merge application data.
 ### Navigation
 
 - Normal HTTPS navigation and login redirects remain inside the app.
+- Non-HTTPS top-level navigation is blocked in v1.
 - External pop-up links open in the system browser.
 - Certificate errors are never bypassed automatically.
 - Native file capabilities are active only on the configured trusted origin.
@@ -218,9 +223,9 @@ Custom DNS is implemented without changing device-wide settings:
 3. The proxy resolves target hostnames through the configured DoH endpoint.
 4. HTTPS remains end-to-end between the WebView and target site; the proxy does not intercept TLS.
 
-On Windows, the runtime uses WebView/Wry proxy configuration. On Android, it uses AndroidX WebKit's process-scoped `ProxyController` through the platform bridge.
+On Windows, the runtime uses WebView/Wry proxy configuration. On Android, it uses AndroidX WebKit's process-scoped `ProxyController` through the platform bridge. Before loading any remote page, Android checks `WebViewFeature.PROXY_OVERRIDE`; if unavailable, custom-DNS mode shows an incompatibility error and does not load through system DNS.
 
-The loopback listener accepts connections only from the local process boundary where the platform permits and never binds a LAN interface. DNS responses may be cached according to their TTL.
+The loopback listener binds only a loopback interface, rejects non-CONNECT traffic, and applies connection and request limits. Loopback does not authenticate the calling process, so other local processes may be able to reach it; this is accepted because it exposes neither LAN access nor a TLS interception capability. DNS responses may be cached according to their TTL.
 
 The system resolver may bootstrap the DoH server hostname itself, but target-site lookups never use system DNS while custom mode is active.
 
@@ -328,7 +333,11 @@ If a site saves by downloading a new file, the runtime may offer to replace the 
 - Custom DoH URL validation and fail-closed state transitions.
 - Packaging transactions do not publish partial outputs.
 - Android manifest inspection, signature verification, and version-code monotonicity.
+- Durable version-code reservation, interrupted-build non-reuse, transactional backup/restore, and restored-state version-floor verification.
 - Origin checks deny bridge delivery after navigation.
+- Concurrent generated Windows apps use distinct current-user single-instance endpoints, reject malformed messages, and route open requests only to the matching identity.
+- Android custom DNS fails closed when `WebViewFeature.PROXY_OVERRIDE` is unavailable.
+- Plain HTTP launch and top-level navigation URLs are rejected.
 
 ### V1 release gates
 
@@ -338,11 +347,14 @@ If a site saves by downloading a new file, the runtime may offer to replace the 
 4. On Windows, a generated Photopea app appears in **Open with**, opens a PSD, edits it, and Ctrl+S changes the original file bytes.
 5. On Windows, a generated `vscode.dev` app appears in **Open with**, opens an MD file, edits it, and Ctrl+S changes the original file bytes.
 6. A second file opened while the Windows app is running reaches that instance.
-7. File access is unavailable after navigation to an untrusted origin.
-8. A generated APK passes `apksigner verify` and its manifest contains the expected application ID, label, and intent filters.
-9. Twitter and Facebook use separate Windows WebView2 data directories.
-10. A custom DoH test proves target lookups use the chosen endpoint.
-11. An unreachable DoH endpoint does not silently use system DNS.
+7. Twitter and Facebook run concurrently on Windows; a second open request reaches only the matching app.
+8. File access is unavailable after navigation to an untrusted origin.
+9. A generated APK passes `apksigner verify` and its manifest contains the expected application ID, label, version code, and intent filters.
+10. Regeneration after an interrupted build uses a greater Android version code; restoration blocks updates until a version floor is verified, after which the next APK uses a greater code.
+11. Twitter and Facebook use separate Windows WebView2 data directories.
+12. A custom DoH test proves target lookups use the chosen endpoint.
+13. An unreachable DoH endpoint, or an Android WebView without proxy-override support, does not silently use system DNS.
+14. The generator and runtime reject non-HTTPS website URLs.
 
 ## Delivery sequence
 
