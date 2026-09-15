@@ -46,6 +46,9 @@ pub fn edit_resources(
     display_name: &str,
     version: &str,
 ) -> Result<(), PeError> {
+    validate_spec(spec)?;
+    validate_text(display_name, "display-name")?;
+    validate_text(version, "version")?;
     let mut resources = image.resource_directory().cloned().unwrap_or_default();
     let mut data = ResourceData::default();
     data.set_data(spec.to_vec());
@@ -55,7 +58,16 @@ pub fn edit_resources(
         ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
         ResourceEntry::Data(data),
     );
-    let mut names = ResourceTable::default();
+    let mut names = match resources
+        .root()
+        .get(ResourceEntryName::ID(RT_RCDATA as u32))
+    {
+        Some(ResourceEntry::Table(table)) => table.clone(),
+        Some(ResourceEntry::Data(_)) => {
+            return Err(PeError::Resource("RCDATA is not a table".into()))
+        }
+        None => ResourceTable::default(),
+    };
     names.insert(
         ResourceEntryName::from_string("WEBWRAP_APP_SPEC"),
         ResourceEntry::Table(languages),
@@ -132,19 +144,23 @@ pub fn read_metadata(path: &Path) -> Result<Metadata, PeError> {
         .get_version_info()
         .map_err(|error| PeError::Resource(error.to_string()))?
         .ok_or_else(|| PeError::MissingResource("version info".into()))?;
-    let strings = info
-        .strings
-        .iter()
-        .flat_map(|table| table.strings.iter())
-        .collect::<std::collections::HashMap<_, _>>();
-    let file_description = strings
-        .get("FileDescription")
-        .ok_or_else(|| PeError::MissingResource("FileDescription".into()))?
-        .to_string();
-    let product_version = strings
-        .get("ProductVersion")
-        .ok_or_else(|| PeError::MissingResource("ProductVersion".into()))?
-        .to_string();
+    let find_string = |key: &str| {
+        info.strings
+            .iter()
+            .find_map(|table| table.strings.get(key))
+            .cloned()
+            .ok_or_else(|| PeError::MissingResource(key.into()))
+    };
+    for key in [
+        "FileDescription",
+        "ProductName",
+        "FileVersion",
+        "ProductVersion",
+    ] {
+        find_string(key)?;
+    }
+    let file_description = find_string("FileDescription")?;
+    let product_version = find_string("ProductVersion")?;
     Ok(Metadata {
         spec,
         icon_present,
