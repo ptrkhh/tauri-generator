@@ -142,6 +142,23 @@ mod tests {
         .is_err());
         assert!(parse_args(Vec::<String>::new()).is_err());
         assert!(parse_args(["unknown", "--input", "a.exe"]).is_err());
+        assert!(parse_args(["specialize", "--input", "a.exe"]).is_err());
+        assert!(parse_args([
+            "specialize",
+            "--input",
+            "a.exe",
+            "--output",
+            "a.exe",
+            "--spec",
+            "s",
+            "--icon",
+            "i",
+            "--display-name",
+            "A",
+            "--version",
+            "1"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -163,6 +180,7 @@ mod tests {
     #[test]
     fn validates_text_boundaries() {
         assert!(pe::validate_text("a", "field").is_ok());
+        assert!(pe::validate_text("a\n", "display-name").is_err());
         assert!(pe::validate_text(&"a".repeat(255), "field").is_ok());
         assert!(pe::validate_text(&"a".repeat(256), "field").is_err());
         assert!(pe::validate_text("a\0", "field").is_err());
