@@ -27,12 +27,21 @@ impl Verdict {
 /// every OAuth redirect to an identity provider and break login, so the
 /// navigation verdict depends only on the scheme and the event kind.
 pub fn nav_verdict(url: &str, event: NavEvent) -> Verdict {
-    if matches!(event, NavEvent::NewWindow) {
-        return Verdict::OpenExternally;
-    }
-    match Url::parse(url) {
-        Ok(parsed) if parsed.scheme() == "https" => Verdict::Allow,
-        _ => Verdict::Block,
+    let scheme = Url::parse(url)
+        .ok()
+        .map(|parsed| parsed.scheme().to_string());
+    match (event, scheme.as_deref()) {
+        // A pop-up is handed to the system browser, so only the two schemes a
+        // browser is expected to take may take that path. `OpenExternally`
+        // becomes a shell open in the runtime, and letting remote page content
+        // choose the scheme would let it choose which registered Windows
+        // protocol handler launches — the `ms-msdt:` and `search-ms:` class of
+        // problem. `http` is safe to hand over because the system browser, not
+        // this app, renders it.
+        (NavEvent::NewWindow, Some("https" | "http")) => Verdict::OpenExternally,
+        (NavEvent::NewWindow, _) => Verdict::Block,
+        (NavEvent::TopLevel, Some("https")) => Verdict::Allow,
+        (NavEvent::TopLevel, _) => Verdict::Block,
     }
 }
 
@@ -93,11 +102,35 @@ mod tests {
     }
 
     #[test]
-    fn every_new_window_opens_externally_regardless_of_scheme() {
-        for url in ["https://example.com/", "http://example.com/", "garbage"] {
+    fn only_browser_schemes_may_open_in_a_new_window() {
+        for url in ["https://example.com/", "http://example.com/"] {
             assert_eq!(
                 nav_verdict(url, NavEvent::NewWindow),
                 Verdict::OpenExternally,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_window_never_hands_a_non_browser_scheme_to_the_shell() {
+        // OpenExternally becomes a shell open. If remote page content could
+        // pick the scheme it could pick which Windows protocol handler
+        // launches, which is the ms-msdt:/search-ms: class of problem.
+        for url in [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-msdt:/id PCWDiagnostic",
+            "search-ms:query=x",
+            "vbscript:msgbox(1)",
+            "shell:startup",
+            "garbage",
+            "",
+        ] {
+            assert_eq!(
+                nav_verdict(url, NavEvent::NewWindow),
+                Verdict::Block,
                 "{url}"
             );
         }

@@ -11,9 +11,13 @@ pub const MAX_SPEC_BYTES: usize = 64 * 1024;
 
 /// Names Windows reserves device-wide. The slug becomes a filename, so a slug
 /// of "nul" would ask the generator to publish `nul.exe`.
-const RESERVED_DEVICE_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+///
+/// `com0` and `lpt0` are included because current Microsoft guidance lists
+/// them alongside 1-9. `CONIN$` and `CONOUT$` are unreachable here: the slug
+/// charset has no `$`.
+const RESERVED_DEVICE_NAMES: [&str; 24] = [
+    "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+    "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,17 +117,48 @@ fn field(name: &'static str, reason: impl Into<String>) -> SpecError {
     }
 }
 
+/// Code points that render as nothing or reorder what follows them.
+///
+/// `char::is_control` is false for all of these, so they survive the control
+/// check and land in a window title and in the PE `FileDescription`, where a
+/// right-to-left override can make a name read as something else entirely.
+fn is_deceptive(c: char) -> bool {
+    matches!(c,
+        '\u{00ad}'                  // soft hyphen
+        | '\u{200b}'..='\u{200f}'   // zero width spaces and joiners, LRM, RLM
+        | '\u{202a}'..='\u{202e}'   // bidi embedding and override
+        | '\u{2060}'..='\u{2064}'   // invisible operators
+        | '\u{2066}'..='\u{2069}'   // bidi isolates
+        | '\u{feff}'                // byte order mark
+    )
+}
+
 /// Shared rule for human-readable single-line strings.
-fn check_text(value: &str, name: &'static str) -> Result<(), SpecError> {
-    let length = value.chars().count();
-    if length == 0 {
-        return Err(field(name, "must not be empty"));
+///
+/// The length bound is in **bytes**, not characters, to match the PE
+/// specializer this eventually feeds: `pe.rs` bounds `display-name` with
+/// `value.len() > 255`. Bounding characters here instead would accept a
+/// 255-character CJK name (765 bytes) that then fails during resource editing,
+/// putting the error in the wrong sub-project and far from the field the user
+/// typed.
+fn check_text(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("must not be empty".into());
     }
-    if length > 255 {
-        return Err(field(name, "must be at most 255 characters"));
+    if value.trim().is_empty() {
+        return Err("must not be entirely whitespace".into());
+    }
+    if value.len() > 255 {
+        return Err(format!(
+            "must be at most 255 bytes, found {} bytes",
+            value.len()
+        ));
     }
     if value.chars().any(char::is_control) {
-        return Err(field(name, "must not contain control characters"));
+        return Err("must not contain control characters".into());
+    }
+    if value.chars().any(is_deceptive) {
+        return Err("must not contain invisible or direction-changing characters".into());
     }
     Ok(())
 }
@@ -169,22 +204,53 @@ fn check_assoc(assoc: &Assoc) -> Result<(), String> {
     if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
         return Err(format!("mimeType {mime} must be type/subtype"));
     }
-    if mime.chars().any(|c| !c.is_ascii_graphic()) {
-        return Err(format!("mimeType {mime} must not contain spaces"));
+    // RFC 2045 token characters, further required to begin alphanumerically so
+    // that a subtype cannot be something like ".." — this value is written into
+    // registry entries by sub-project E and into an Android manifest later.
+    for part in &parts {
+        if !part.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+            return Err(format!(
+                "mimeType {mime} must have parts that start with a letter or digit"
+            ));
+        }
+        if !part.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '!' | '#'
+                        | '$'
+                        | '%'
+                        | '&'
+                        | '\''
+                        | '*'
+                        | '+'
+                        | '-'
+                        | '.'
+                        | '^'
+                        | '_'
+                        | '`'
+                        | '|'
+                        | '~'
+                )
+        }) {
+            return Err(format!(
+                "mimeType {mime} contains a character that is not allowed"
+            ));
+        }
     }
-    if assoc.description.is_empty()
-        || assoc.description.chars().count() > 255
-        || assoc.description.chars().any(char::is_control)
-    {
-        return Err("description must be 1 to 255 characters with no control characters".into());
-    }
+    check_text(&assoc.description).map_err(|reason| format!("description {reason}"))?;
     Ok(())
 }
 
 impl AppSpec {
     /// Check every field in isolation. Cross-field invariants live in
     /// `validate`.
-    pub fn validate_fields(&self) -> Result<(), SpecError> {
+    ///
+    /// Deliberately private. It does not check that `launch_url` is canonical,
+    /// which is the property everything else hangs off, so a caller reaching
+    /// for "just the field checks" would get a silent pass on the one field
+    /// that matters most. `validate` is the only entry point.
+    fn validate_fields(&self) -> Result<(), SpecError> {
         if self.schema_version != 1 {
             return Err(field(
                 "schemaVersion",
@@ -204,7 +270,13 @@ impl AppSpec {
             ));
         }
 
-        check_text(&self.display_name, "displayName")?;
+        check_text(&self.display_name).map_err(|reason| field("displayName", reason))?;
+
+        // Bounded independently of MAX_SPEC_BYTES so the field stays symmetric
+        // with displayName and slug. Well beyond any real launch URL.
+        if self.launch_url.len() > 2048 {
+            return Err(field("launchUrl", "must be at most 2048 bytes"));
+        }
 
         let slug = &self.slug;
         if slug.is_empty() || slug.len() > 64 {
@@ -243,8 +315,17 @@ impl AppSpec {
             }
         }
 
+        // Every component must be plain digits before parsing: Rust's unsigned
+        // FromStr accepts a leading `+`, so "+1.0.0" would otherwise pass and
+        // be written verbatim into the PE FileVersion string.
         let components: Vec<&str> = self.app_version.split('.').collect();
-        if components.len() != 3 || components.iter().any(|part| part.parse::<u16>().is_err()) {
+        if components.len() != 3
+            || components.iter().any(|part| {
+                part.is_empty()
+                    || !part.chars().all(|c| c.is_ascii_digit())
+                    || part.parse::<u16>().is_err()
+            })
+        {
             return Err(field(
                 "appVersion",
                 "must be three numbers separated by dots, each at most 65535",
@@ -372,7 +453,7 @@ mod tests {
 
     #[test]
     fn display_name_rejects_empty_control_characters_and_overlong() {
-        for bad in ["", "Photo\npea", "Photo\0pea", &"a".repeat(256)] {
+        for bad in ["", "   ", "Photo\npea", "Photo\0pea", &"a".repeat(256)] {
             let mut spec = valid();
             spec.display_name = bad.into();
             assert_eq!(field_of(spec.validate_fields()), "displayName");
@@ -380,6 +461,55 @@ mod tests {
         let mut spec = valid();
         spec.display_name = "a".repeat(255);
         assert_eq!(spec.validate_fields(), Ok(()));
+    }
+
+    #[test]
+    fn display_name_is_bounded_in_bytes_not_characters() {
+        // The PE specializer bounds display-name with value.len() > 255, so a
+        // character bound here would accept names it then rejects. 255 CJK
+        // characters are 765 bytes. An ASCII-only fixture cannot catch this,
+        // which is why it is tested explicitly.
+        let cjk = "\u{6f22}".repeat(255);
+        assert_eq!(cjk.chars().count(), 255);
+        assert_eq!(cjk.len(), 765);
+        let mut spec = valid();
+        spec.display_name = cjk;
+        assert_eq!(field_of(spec.validate_fields()), "displayName");
+
+        // 85 CJK characters are exactly 255 bytes and must be accepted.
+        let mut spec = valid();
+        spec.display_name = "\u{6f22}".repeat(85);
+        assert_eq!(spec.display_name.len(), 255);
+        assert_eq!(spec.validate_fields(), Ok(()));
+    }
+
+    #[test]
+    fn display_name_rejects_invisible_and_direction_changing_characters() {
+        // None of these are control characters, so they survive that check and
+        // would reach the window title and the PE FileDescription, where a
+        // right-to-left override makes a name read as something else.
+        for bad in [
+            "Photo\u{202e}pea",
+            "Photo\u{200b}pea",
+            "Photo\u{00ad}pea",
+            "\u{feff}Photopea",
+            "Photo\u{2066}pea",
+        ] {
+            let mut spec = valid();
+            spec.display_name = bad.into();
+            assert_eq!(
+                field_of(spec.validate_fields()),
+                "displayName",
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_url_is_length_bounded() {
+        let mut spec = valid();
+        spec.launch_url = format!("https://example.test/{}", "a".repeat(2048));
+        assert_eq!(field_of(spec.validate_fields()), "launchUrl");
     }
 
     #[test]
@@ -461,6 +591,69 @@ mod tests {
             spec.app_version = good.into();
             assert_eq!(spec.validate_fields(), Ok(()), "{good}");
         }
+    }
+
+    #[test]
+    fn app_version_rejects_a_signed_component() {
+        // Rust's unsigned FromStr accepts a leading `+`, so "+1".parse::<u16>()
+        // is Ok(1). Without an explicit digit check the value would reach the
+        // PE FileVersion string as "+1.0.0".
+        assert_eq!("+1".parse::<u16>(), Ok(1));
+        for bad in ["+1.0.0", "1.+0.0", "1.0.+0", "-1.0.0", "1.-0.0"] {
+            let mut spec = valid();
+            spec.app_version = bad.into();
+            assert_eq!(field_of(spec.validate_fields()), "appVersion", "{bad}");
+        }
+    }
+
+    #[test]
+    fn boundary_lengths_are_accepted_not_just_rejected() {
+        let mut spec = valid();
+        spec.slug = "a".repeat(64);
+        assert_eq!(spec.validate_fields(), Ok(()), "64-character slug");
+
+        let mut spec = valid();
+        spec.file_associations[0].extension = format!(".{}", "a".repeat(16));
+        assert_eq!(spec.validate_fields(), Ok(()), "16-character extension");
+
+        let mut spec = valid();
+        spec.file_associations[0].description = "a".repeat(255);
+        assert_eq!(spec.validate_fields(), Ok(()), "255-byte description");
+    }
+
+    #[test]
+    fn mime_types_must_be_token_shaped() {
+        for bad in [
+            "image/..",
+            "image/-x",
+            "../x",
+            "image/x y",
+            "image/x\u{00e9}",
+            "image/x;charset=y",
+        ] {
+            let mut spec = valid();
+            spec.file_associations[0].mime_type = bad.into();
+            assert_eq!(
+                field_of(spec.validate_fields()),
+                "fileAssociations",
+                "{bad}"
+            );
+        }
+        for good in [
+            "image/vnd.adobe.photoshop",
+            "text/markdown",
+            "text/x-c++src",
+        ] {
+            let mut spec = valid();
+            spec.file_associations[0].mime_type = good.into();
+            assert_eq!(spec.validate_fields(), Ok(()), "{good}");
+        }
+    }
+
+    #[test]
+    fn assoc_also_rejects_unknown_fields() {
+        let json = r#"{"extension":".psd","mimeType":"image/x","description":"d","extra":1}"#;
+        assert!(serde_json::from_str::<Assoc>(json).is_err());
     }
 
     #[test]

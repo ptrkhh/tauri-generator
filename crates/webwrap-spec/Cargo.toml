@@ -2,6 +2,9 @@
 name = "webwrap-spec"
 version = "0.1.0"
 edition = "2021"
+# Option::is_none_or, used in identity.rs, stabilized in 1.82. Stating it here
+# turns a 1.81 build into a cargo MSRV message instead of a type error.
+rust-version = "1.82"
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }

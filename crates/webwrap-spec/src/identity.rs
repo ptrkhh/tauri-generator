@@ -24,6 +24,40 @@ impl std::fmt::Display for IdentityError {
 
 impl std::error::Error for IdentityError {}
 
+/// Whether the input already carries a URL scheme.
+///
+/// A substring test for `"://"` is not good enough in either direction. It
+/// misses a single-slash typo, so `http:/example.com` would be treated as
+/// schemeless and become `https://http/example.com` — a fabricated host taken
+/// from the scheme text, which then validates and ships as an app that can
+/// never resolve. It also fires on a schemeless URL whose query or fragment
+/// contains an absolute URL, so `example.com/?next=https://other.test` would
+/// be rejected outright, and that is exactly the shape a Photopea or
+/// vscode.dev deep link has.
+///
+/// So look for a scheme only in the part before the first `/`, `?`, or `#`,
+/// and treat a purely numeric remainder as a port rather than a scheme so
+/// that `twitter.com:8443` still gets the `https://` prefix.
+fn has_scheme(value: &str) -> bool {
+    let end = value.find(['/', '?', '#']).unwrap_or(value.len());
+    let head = &value[..end];
+    let Some(colon) = head.find(':') else {
+        return false;
+    };
+    let (scheme, rest) = (&head[..colon], &head[colon + 1..]);
+    if !scheme.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    if !scheme
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        return false;
+    }
+    let rest_is_a_port = !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    !rest_is_a_port
+}
+
 /// Canonicalize a website address into the exact string that identity is
 /// derived from.
 ///
@@ -35,7 +69,7 @@ pub fn canonicalize_url(input: &str) -> Result<String, IdentityError> {
     if trimmed.is_empty() {
         return Err(IdentityError::Unparseable);
     }
-    let candidate = if trimmed.contains("://") {
+    let candidate = if has_scheme(trimmed) {
         trimmed.to_string()
     } else {
         format!("https://{trimmed}")
@@ -44,6 +78,10 @@ pub fn canonicalize_url(input: &str) -> Result<String, IdentityError> {
     if url.scheme() != "https" {
         return Err(IdentityError::NotHttps);
     }
+    // Defence in depth rather than a live path: for the special scheme
+    // `https` the url crate already rejects an empty host at parse time, and
+    // every other scheme was rejected on the line above, so no known input
+    // reaches this branch.
     if url.host_str().is_none_or(str::is_empty) {
         return Err(IdentityError::NoHost);
     }

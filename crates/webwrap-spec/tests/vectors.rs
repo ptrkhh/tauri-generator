@@ -77,3 +77,57 @@ fn non_https_and_malformed_inputs_are_rejected() {
     assert!(canonicalize_url("   ").is_err());
     assert!(canonicalize_url("https://").is_err());
 }
+
+/// A substring test for "://" got both of these wrong, and got them wrong
+/// silently: a single-slash scheme became a fabricated host taken from the
+/// scheme text, and a legitimate deep link was refused. Both are invisible
+/// without an explicit case, so these stay as permanent regression vectors.
+#[test]
+fn a_single_slash_scheme_is_not_mistaken_for_a_missing_scheme() {
+    // Each of these once produced a fabricated host, e.g. https://http/...
+    for input in [
+        "http:/example.com",
+        "ftp:/example.com",
+        "C:\\Users\\x",
+        "D:\\site\\index.html",
+        "mailto:a@b.com",
+        "javascript:alert(1)",
+    ] {
+        assert_eq!(
+            canonicalize_url(input),
+            Err(IdentityError::NotHttps),
+            "{input} must be rejected, never given an invented host"
+        );
+    }
+
+    // The https typo normalizes the way a browser normalizes it.
+    assert_eq!(
+        canonicalize_url("https:/example.com").unwrap(),
+        "https://example.com/"
+    );
+}
+
+#[test]
+fn a_schemeless_url_may_carry_an_absolute_url_in_its_query_or_fragment() {
+    // A Photopea or vscode.dev deep link has exactly this shape.
+    assert_eq!(
+        canonicalize_url("example.com/?next=https://other.test").unwrap(),
+        "https://example.com/?next=https://other.test"
+    );
+    assert_eq!(
+        canonicalize_url("photopea.com/#https://example.com/file.psd").unwrap(),
+        "https://photopea.com/#https://example.com/file.psd"
+    );
+}
+
+#[test]
+fn a_host_and_port_is_not_mistaken_for_a_scheme() {
+    assert_eq!(
+        canonicalize_url("twitter.com:8443").unwrap(),
+        "https://twitter.com:8443/"
+    );
+    assert_eq!(
+        canonicalize_url("twitter.com:8443/path").unwrap(),
+        "https://twitter.com:8443/path"
+    );
+}
