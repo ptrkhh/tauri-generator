@@ -1,7 +1,3 @@
 [workspace]
-members = [
-    "spikes/vscode-webview2-handle",
-    "spikes/photopea-windows-writeback",
-    "spikes/windows-pe-specialization",
-]
+members = ["crates/*", "spikes/*"]
 resolver = "2"
