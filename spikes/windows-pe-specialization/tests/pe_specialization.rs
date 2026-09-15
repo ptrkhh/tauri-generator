@@ -86,4 +86,18 @@ fn invalid_icon_and_same_input_output_are_rejected_without_output() {
     let _ = std::fs::remove_dir_all(temp);
 }
 
+#[cfg(windows)]
+#[test]
+fn rejects_output_symlink_alias_of_input() {
+    use std::os::windows::fs::symlink_file;
+    let temp = temp_dir();
+    let input = std::env::current_exe().unwrap();
+    let alias = temp.join("alias.exe");
+    symlink_file(&input, &alias).unwrap();
+    let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../photopea-windows-writeback/icons/icon.png");
+    assert!(specialize(&input, &alias, SPEC, &icon, "Twitter", "1.0.0").is_err());
+    let _ = std::fs::remove_dir_all(temp);
+}
+
 const SPEC: &[u8] = br#"{"schemaVersion":1,"appId":"a123","displayName":"Photopea","slug":"photopea","launchUrl":"https://www.photopea.com/"}"#;

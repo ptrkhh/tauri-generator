@@ -16,10 +16,10 @@ fn main() {
         Command::Specialize(args) => {
             let spec = match fs::read(&args.spec) {
                 Ok(spec) => spec,
-                Err(error) => fail(error.to_string()),
+                Err(error) => fail(2, error.to_string()),
             };
             if let Err(error) = pe::validate_spec(&spec) {
-                fail(error.to_string());
+                fail(2, error.to_string());
             }
             match pe::specialize(
                 &args.input,
@@ -36,7 +36,7 @@ fn main() {
                     "fileDescription": metadata.file_description,
                     "productVersion": metadata.product_version,
                 }),
-                Err(error) => fail(error.to_string()),
+                Err(error) => fail(1, error.to_string()),
             }
         }
         Command::Inspect(args) => match pe::read_metadata(&args.input) {
@@ -47,13 +47,13 @@ fn main() {
                 "fileDescription": metadata.file_description,
                 "productVersion": metadata.product_version,
             }),
-            Err(error) => fail(error.to_string()),
+            Err(error) => fail(1, error.to_string()),
         },
     };
     println!("{}", result);
 }
 
-fn fail(error: String) -> ! {
+fn fail(code: i32, error: String) -> ! {
     eprintln!("{error}");
-    std::process::exit(1);
+    std::process::exit(code);
 }

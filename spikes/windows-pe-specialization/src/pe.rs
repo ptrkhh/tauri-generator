@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::fmt;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -193,6 +194,13 @@ pub fn specialize(
         .canonicalize()
         .map_err(|error| PeError::Image(error.to_string()))?;
     let output = parent.join(output.file_name().ok_or(PeError::InvalidPath)?);
+    let output = if output.exists() {
+        output
+            .canonicalize()
+            .map_err(|error| PeError::Image(error.to_string()))?
+    } else {
+        output
+    };
     if input == output {
         return Err(PeError::InvalidPath);
     }
@@ -212,19 +220,28 @@ pub fn specialize(
             .create_new(true)
             .open(&candidate)
         {
-            Ok(_) => {
-                staged = Some(candidate);
+            Ok(file) => {
+                staged = Some((candidate, file));
                 break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(PeError::Image(error.to_string())),
         }
     }
-    let staged = staged.ok_or_else(|| PeError::Image("could not create staging file".into()))?;
+    let (staged, mut staged_file) =
+        staged.ok_or_else(|| PeError::Image("could not create staging file".into()))?;
     let result = (|| {
         image
-            .write_file(&staged)
+            .write_writer(&mut staged_file)
             .map_err(|error| PeError::Image(error.to_string()))?;
+        staged_file
+            .flush()
+            .and_then(|_| staged_file.sync_all())
+            .map_err(|error| PeError::Image(error.to_string()))?;
+        Ok(())
+    })();
+    drop(staged_file);
+    let result = result.and_then(|()| {
         let staged_image =
             Image::parse_file(&staged).map_err(|error| PeError::Image(error.to_string()))?;
         drop(staged_image);
@@ -236,7 +253,7 @@ pub fn specialize(
         let metadata = read_metadata(&staged)?;
         publish(&staged, &output)?;
         Ok(metadata)
-    })();
+    });
     if result.is_err() {
         let _ = fs::remove_file(&staged);
     }
