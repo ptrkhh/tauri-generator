@@ -2,5 +2,6 @@
 members = [
     "spikes/vscode-webview2-handle",
     "spikes/photopea-windows-writeback",
+    "spikes/windows-pe-specialization",
 ]
 resolver = "2"
