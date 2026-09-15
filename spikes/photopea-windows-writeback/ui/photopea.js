@@ -63,6 +63,7 @@
   let fileAssociation;
   let fileState = "idle";
   let openState = "waiting-photopea";
+  let saveState = "idle";
   let photopeaReady = false;
 
   const setStatus = (text) => {
@@ -72,6 +73,61 @@
   const reportError = (reason, notifyNative = true) => {
     setStatus(`FAIL: ${reason}`);
     if (notifyNative) bridge?.postMessage(messages.error);
+  };
+
+  const base64From = (buffer) => {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+  };
+
+  const requestSave = () => {
+    if (openState !== "opened" || saveState !== "idle" || !sourceId) {
+      reportError("Photopea save requested out of order");
+      return;
+    }
+    saveState = "requested";
+    bridge?.postMessage(messages.saveRequested);
+    try {
+      frame.contentWindow.postMessage(
+        'app.activeDocument.saveToOE("psd");app.echoToOE(app.activeDocument.source);',
+        PHOTOPEA_ORIGIN,
+      );
+    } catch (error) {
+      saveState = "idle";
+      reportError(`Photopea save request failed: ${error?.message || "unknown error"}`);
+    }
+  };
+
+  const handleExport = (buffer) => {
+    if (saveState !== "requested" || !sourceId || fileAssociation?.sourceId !== sourceId) {
+      reportError("Photopea export arrived out of order");
+      return;
+    }
+    if (buffer.byteLength > MAX_PSD_BYTES) {
+      saveState = "idle";
+      reportError("PSD export exceeds the 32 MiB spike limit");
+      return;
+    }
+    let encoded;
+    try {
+      encoded = base64From(buffer);
+    } catch (error) {
+      saveState = "idle";
+      reportError(`PSD export encoding failed: ${error?.message || "unknown error"}`);
+      return;
+    }
+    saveState = "awaiting-native";
+    bridge?.postMessage(
+      JSON.stringify({
+        type: "webwrap-photopea-save",
+        source: sourceId,
+        data: encoded,
+      }),
+    );
   };
 
   const reportOpened = () => {
@@ -123,7 +179,7 @@
     }
   };
 
-  const readHandle = async (handle) => {
+  const readHandle = async (handle, nativeSourceId) => {
     if (fileState !== "idle") {
       reportError("duplicate file handle");
       return;
@@ -149,7 +205,15 @@
         return;
       }
       fileName = file.name || "file";
-      sourceId = sourceIdFor(fileName, crypto.randomUUID());
+      if (
+        typeof nativeSourceId !== "string" ||
+        !nativeSourceId.startsWith("webwrap-local:") ||
+        nativeSourceId.length > 256
+      ) {
+        reportError("native source ID is invalid");
+        return;
+      }
+      sourceId = nativeSourceId;
       fileAssociation = { sourceId, handle };
       fileBytes = bytes;
       fileState = "ready";
@@ -162,16 +226,31 @@
   };
 
   bridge?.addEventListener("message", (event) => {
+    if (event.data?.type === "webwrap-photopea-save-complete") {
+      if (saveState !== "awaiting-native") {
+        reportError("native save completed out of order", false);
+        return;
+      }
+      saveState = "idle";
+      setStatus(`PASS: Saved ${fileName}`);
+      return;
+    }
     if (event.data?.type === "webwrap-error") {
+      saveState = "idle";
       reportError("native bridge failed", false);
       return;
     }
     if (event.data?.type !== "webwrap-file") return;
-    void readHandle(event.additionalObjects?.[0]);
+    void readHandle(event.additionalObjects?.[0], event.data.source);
   });
 
   window.addEventListener("message", (event) => {
     if (event.source !== frame.contentWindow || event.origin !== PHOTOPEA_ORIGIN) return;
+
+    if (event.data instanceof ArrayBuffer) {
+      handleExport(event.data);
+      return;
+    }
 
     if (event.data === "done") {
       if (!photopeaReady) {
@@ -180,6 +259,11 @@
       } else if (openState === "waiting-file-done") {
         sendSourceAssignment();
       }
+      return;
+    }
+
+    if (event.data === "Save") {
+      requestSave();
       return;
     }
 
