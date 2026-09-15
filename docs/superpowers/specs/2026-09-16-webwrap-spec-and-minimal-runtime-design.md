@@ -28,7 +28,7 @@ When this sub-project lands, a specialized executable opens its own configured w
 - Per-identity WebView2 data directory isolation.
 - A visible fatal-error surface for a GUI-subsystem binary.
 - A `--inspect-self` JSON mode that makes the runtime's own configuration assertable by automated tests.
-- Placeholder icon and version resources so sub-project C has something to replace.
+- A placeholder icon and version resources so sub-project C has something to replace. The icon is the load-bearing one: the spike's specializer calls `remove_main_icon` before `set_main_icon_file`, so a template with no main icon cannot be specialized. Version strings are created if absent, so `VERSIONINFO` is shipped for the sake of the unspecialized template not being anonymous rather than because specialization requires it.
 
 ### Out of scope
 
@@ -174,7 +174,7 @@ Conflating the two would break authentication: an OAuth redirect to an identity 
 `policy.rs` exposes two independent functions:
 
 - `nav_verdict(url, event) -> Verdict`, where `event` is `TopLevel` or `NewWindow`. It deliberately does **not** take the specification: once trusted origins are known to gate the bridge rather than navigation, the navigation verdict depends only on the scheme and the event kind. Passing a specification it cannot use would imply navigation is origin-restricted, which is exactly the misreading that breaks login.
-- `is_trusted_origin(&spec, origin) -> bool`, the bridge predicate.
+- `is_trusted_origin(trusted_origins: &[String], url: &str) -> bool`, the bridge predicate. It takes the slice rather than the whole specification so that `policy` has no dependency on `schema` at all, which keeps the two modules independently implementable and reviewable. It compares serialized origins, never string prefixes — a prefix comparison would accept `https://www.photopea.com.evil.test`.
 
 Both are defined and tested in A even though the bridge predicate is first used in D, so that `trustedOrigins` has enforced semantics from the moment the field exists rather than sitting unvalidated for two sub-projects.
 
