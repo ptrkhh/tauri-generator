@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::identity::{app_identity, canonicalize_url};
+
 /// Largest accepted specification resource. A specialized executable carries
 /// a handful of short strings; anything approaching this is a defect.
 pub const MAX_SPEC_BYTES: usize = 64 * 1024;
@@ -262,6 +264,49 @@ impl AppSpec {
 
         Ok(())
     }
+
+    /// Check every field, then the two cross-field invariants.
+    ///
+    /// Field errors are reported first so a message names the smallest cause.
+    pub fn validate(&self) -> Result<(), SpecError> {
+        self.validate_fields()?;
+
+        // Invariant 1: the launch URL is already canonical. If it is not, the
+        // specification was produced by a path that skipped canonicalization.
+        let canonical = canonicalize_url(&self.launch_url)
+            .map_err(|error| field("launchUrl", error.to_string()))?;
+        if canonical != self.launch_url {
+            return Err(SpecError::NotCanonical {
+                launch_url: self.launch_url.clone(),
+                canonical,
+            });
+        }
+
+        // Invariant 2: the identity matches the URL it was derived from. This
+        // keeps the WebView2 data directory from drifting away from the site
+        // it belongs to, and catches a hand-edited specification.
+        let expected = app_identity(&canonical);
+        if expected != self.app_id {
+            return Err(SpecError::IdentityMismatch {
+                app_id: self.app_id.clone(),
+                expected,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Parse and fully validate a specification resource.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, SpecError> {
+        if bytes.len() > MAX_SPEC_BYTES {
+            return Err(SpecError::TooLarge { bytes: bytes.len() });
+        }
+        let text = std::str::from_utf8(bytes).map_err(|_| SpecError::NotUtf8)?;
+        let spec: Self =
+            serde_json::from_str(text).map_err(|error| SpecError::Json(error.to_string()))?;
+        spec.validate()?;
+        Ok(spec)
+    }
 }
 
 #[cfg(test)]
@@ -486,5 +531,89 @@ mod tests {
             Adapter::None
         );
         assert!(serde_json::from_str::<Adapter>("\"vscode_dev\"").is_err());
+    }
+
+    #[test]
+    fn validate_accepts_a_self_consistent_specification() {
+        assert_eq!(valid().validate(), Ok(()));
+    }
+
+    #[test]
+    fn launch_url_must_already_be_canonical() {
+        let mut spec = valid();
+        spec.launch_url = "https://www.photopea.com".into(); // missing trailing slash
+        match spec.validate() {
+            Err(SpecError::NotCanonical { canonical, .. }) => {
+                assert_eq!(canonical, "https://www.photopea.com/");
+            }
+            other => panic!("expected NotCanonical, got {other:?}"),
+        }
+
+        let mut spec = valid();
+        spec.launch_url = "http://www.photopea.com/".into();
+        assert!(matches!(
+            spec.validate(),
+            Err(SpecError::Field {
+                field: "launchUrl",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn app_id_must_match_the_launch_url() {
+        let mut spec = valid();
+        spec.launch_url = "https://twitter.com/".into();
+        // app_id still belongs to photopea, so identity no longer matches.
+        match spec.validate() {
+            Err(SpecError::IdentityMismatch { expected, .. }) => {
+                assert_eq!(expected, "2fa5e3f40150278f");
+            }
+            other => panic!("expected IdentityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_errors_are_reported_before_invariants() {
+        let mut spec = valid();
+        spec.schema_version = 2;
+        spec.app_id = "0000000000000000".into();
+        assert_eq!(field_of(spec.validate()), "schemaVersion");
+    }
+
+    #[test]
+    fn from_slice_parses_validates_and_reports_each_failure_kind() {
+        let json = serde_json::to_vec(&valid()).unwrap();
+        assert_eq!(AppSpec::from_slice(&json).unwrap(), valid());
+
+        assert_eq!(
+            AppSpec::from_slice(&vec![b'a'; MAX_SPEC_BYTES + 1]),
+            Err(SpecError::TooLarge {
+                bytes: MAX_SPEC_BYTES + 1
+            })
+        );
+        assert_eq!(AppSpec::from_slice(&[0xff, 0xfe]), Err(SpecError::NotUtf8));
+        assert!(matches!(
+            AppSpec::from_slice(b"{not json"),
+            Err(SpecError::Json(_))
+        ));
+        assert!(matches!(
+            AppSpec::from_slice(b"[1,2,3]"),
+            Err(SpecError::Json(_))
+        ));
+        assert!(matches!(
+            AppSpec::from_slice(b"{}"),
+            Err(SpecError::Json(_))
+        ));
+
+        let mut bad = valid();
+        bad.slug = "con".into();
+        let bad = serde_json::to_vec(&bad).unwrap();
+        assert_eq!(field_of(AppSpec::from_slice(&bad).map(|_| ())), "slug");
+    }
+
+    #[test]
+    fn an_empty_resource_is_rejected_rather_than_treated_as_a_default() {
+        assert!(AppSpec::from_slice(b"").is_err());
     }
 }
