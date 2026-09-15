@@ -16,7 +16,7 @@ fn main() {
         Command::Specialize(args) => {
             let spec = match fs::read(&args.spec) {
                 Ok(spec) => spec,
-                Err(error) => fail(2, error.to_string()),
+                Err(error) => fail(1, error.to_string()),
             };
             if let Err(error) = pe::validate_spec(&spec) {
                 fail(2, error.to_string());
