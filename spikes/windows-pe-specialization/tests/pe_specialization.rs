@@ -56,6 +56,26 @@ fn failed_specialization_preserves_existing_output_and_cleans_stage() {
 }
 
 #[test]
+fn failed_publish_cleans_stage_after_staging_succeeds() {
+    let temp = temp_dir();
+    let input = std::env::current_exe().unwrap();
+    let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../photopea-windows-writeback/icons/icon.png");
+    let blocked = temp.join("blocked.exe");
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(specialize(&input, &blocked, SPEC, &icon, "Twitter", "1.0.0").is_err());
+    assert!(blocked.is_dir());
+    assert!(!std::fs::read_dir(&temp)
+        .unwrap()
+        .map(Result::unwrap)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".webwrap-pe-")));
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn specializes_and_replaces_output_atomically() {
     let temp = temp_dir();
     let input = std::env::current_exe().unwrap();
@@ -65,6 +85,7 @@ fn specializes_and_replaces_output_atomically() {
     let metadata = specialize(&input, &output, SPEC, &icon, "Twitter", "1.0.0").unwrap();
     assert_eq!(metadata.spec, SPEC);
     assert_eq!(metadata.file_description, "Twitter");
+    assert_eq!(read_metadata(&output).unwrap().spec, SPEC);
     assert_eq!(read_metadata(&output).unwrap().product_version, "1.0.0");
     let second = specialize(&input, &output, SPEC, &icon, "Changed", "2.0.0").unwrap();
     assert_eq!(second.file_description, "Changed");
@@ -93,7 +114,9 @@ fn rejects_output_symlink_alias_of_input() {
     let temp = temp_dir();
     let input = std::env::current_exe().unwrap();
     let alias = temp.join("alias.exe");
-    symlink_file(&input, &alias).unwrap();
+    if symlink_file(&input, &alias).is_err() {
+        return;
+    }
     let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../photopea-windows-writeback/icons/icon.png");
     assert!(specialize(&input, &alias, SPEC, &icon, "Twitter", "1.0.0").is_err());

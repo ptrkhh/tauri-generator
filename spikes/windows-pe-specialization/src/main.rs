@@ -1,7 +1,8 @@
 use std::env;
 use std::fs;
+use std::path::Path;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use windows_pe_specialization_spike::{pe, Command};
 
 fn main() {
@@ -29,28 +30,26 @@ fn main() {
                 &args.display_name,
                 &args.version,
             ) {
-                Ok(metadata) => json!({
-                    "output": args.output,
-                    "specBytes": metadata.spec.len(),
-                    "iconPresent": metadata.icon_present,
-                    "fileDescription": metadata.file_description,
-                    "productVersion": metadata.product_version,
-                }),
+                Ok(metadata) => report(&args.output, &metadata),
                 Err(error) => fail(1, error.to_string()),
             }
         }
         Command::Inspect(args) => match pe::read_metadata(&args.input) {
-            Ok(metadata) => json!({
-                "output": args.input,
-                "specBytes": metadata.spec.len(),
-                "iconPresent": metadata.icon_present,
-                "fileDescription": metadata.file_description,
-                "productVersion": metadata.product_version,
-            }),
+            Ok(metadata) => report(&args.input, &metadata),
             Err(error) => fail(1, error.to_string()),
         },
     };
     println!("{}", result);
+}
+
+fn report(path: &Path, metadata: &pe::Metadata) -> Value {
+    json!({
+        "output": path,
+        "specBytes": metadata.spec.len(),
+        "iconPresent": metadata.icon_present,
+        "fileDescription": metadata.file_description,
+        "productVersion": metadata.product_version,
+    })
 }
 
 fn fail(code: i32, error: String) -> ! {
