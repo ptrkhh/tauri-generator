@@ -14,7 +14,7 @@
 
 - **Tasks 1-4 run under WSL.** `cargo test -p webwrap-spec` with no `--target` flag. No Windows needed.
 - **Tasks 5-9 run on Windows.** Sub-project B is `compile_error!` off Windows.
-- **Always pass `--target` explicitly on Windows.** Both `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`. A naive `cargo build` on the ARM64 host silently produces an aarch64 binary.
+- **Always pass `--target` explicitly on Windows.** Both `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`. A naive `cargo build` on the ARM64 host silently produces an aarch64 binary. `--target` is also what routes artifacts into `target/<triple>/` instead of colliding in `target/debug`. Do **not** add `targets = [...]` to `rust-toolchain.toml`: that key only controls which targets rustup installs, it does not change the default build target, and it would make the WSL toolchain download two Windows standard libraries it never uses.
 - **No new dependency trees.** Every crate listed above is already in `Cargo.lock`. Pin with `=` exactly as the existing spikes do.
 - **`spikes/` is untouched by this plan.** Task 6 onward depends on the `webwrap-pe-specialize` binary still existing.
 - **Resource contract, fixed by the existing spike:** type `RT_RCDATA` (ID 10), name `WEBWRAP_APP_SPEC` (a string name, not an ID), language ID `0x0409` (en-US). The runtime must look it up with exactly these values.
@@ -58,7 +58,6 @@
 
 **Files:**
 - Modify: `Cargo.toml`
-- Modify: `rust-toolchain.toml`
 - Create: `crates/webwrap-spec/Cargo.toml`
 - Create: `crates/webwrap-spec/src/lib.rs`
 - Create: `crates/webwrap-spec/src/identity.rs`
@@ -78,14 +77,7 @@ members = ["crates/*", "spikes/*"]
 resolver = "2"
 ```
 
-`rust-toolchain.toml`:
-
-```toml
-[toolchain]
-channel = "stable"
-components = ["clippy", "rustfmt"]
-targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
-```
+Leave `rust-toolchain.toml` unchanged. Target installation belongs to Task 5, on Windows.
 
 `crates/webwrap-spec/Cargo.toml`:
 
@@ -295,7 +287,7 @@ Expected: both pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock rust-toolchain.toml crates/webwrap-spec
+git add Cargo.toml Cargo.lock crates/webwrap-spec
 git commit -m "feat(spec): canonicalize URLs and derive stable app identity"
 ```
 
@@ -1185,6 +1177,15 @@ git commit -m "feat(spec): enforce canonical launch URL and matching identity"
 **Interfaces:**
 - Consumes: `webwrap-spec` by path.
 - Produces: a `webwrap-runtime.exe` binary for both target triples that carries a main icon and a `VERSIONINFO` resource, so the existing `webwrap-pe-specialize` spike binary can specialize it. Also produces the test helper `fn specialize_fixture(spec_json: &str, display_name: &str, version: &str) -> PathBuf` used by Tasks 6-8.
+
+- [ ] **Step 0: Install both Windows targets for the default toolchain**
+
+```bash
+rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+rustup target list --installed
+```
+
+Expected: both triples listed. This is needed once per machine, and it is why `rust-toolchain.toml` carries no `targets` key — that key would impose the same download on the WSL toolchain, which never builds for Windows.
 
 - [ ] **Step 1: Create the crate**
 

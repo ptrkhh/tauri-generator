@@ -262,11 +262,15 @@ Phase 1 exposes nothing sensitive this way: DoH is deferred, and the parent desi
 
 ## Architecture targets
 
-`rust-toolchain.toml` gains `targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]`.
+**Every build and test command passes `--target` explicitly.** Both `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`.
 
-It currently pins `channel = "stable"` with no target list. On the ARM64 Windows host a naive `cargo build` produces an **aarch64** binary, while every existing spike acceptance result was gathered on **x64 MSVC**. B produces the template that C specializes, so the target must be chosen explicitly on every build rather than inherited from the host.
+`rust-toolchain.toml` pins `channel = "stable"` with no target list, so on the ARM64 Windows host a naive `cargo build` produces an **aarch64** binary while every existing spike acceptance result was gathered on **x64 MSVC**. B produces the template C specializes, so the architecture cannot be left to whatever the host happens to be.
 
-All builds and tests pass `--target` explicitly. This also solves an existing problem: a single shared `target/` directory causes WSL host artifacts and Windows MSVC artifacts to clobber each other in `target/debug`, which is why the repository accumulated fourteen ad-hoc target directories totalling 22 GB. Passing `--target x86_64-pc-windows-msvc` routes artifacts into `target/x86_64-pc-windows-msvc/` and leaves WSL host builds in `target/debug`, with no environment variable and no per-task directories.
+Adding `targets = [...]` to `rust-toolchain.toml` was considered and rejected. That key controls only which targets rustup *installs*; it does not change the default build target, so it would not prevent the wrong-arch build it appears to address. It would also make the WSL toolchain download two Windows standard libraries it never uses. The Windows session instead runs `rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc` once, and every command thereafter names its target.
+
+Explicit `--target` is load-bearing beyond correctness: it routes artifacts into `target/<triple>/`, whereas `rustup run <toolchain> cargo build` on a matching host writes to plain `target/debug` — which is precisely how WSL and Windows artifacts came to clobber each other.
+
+This also clears an existing problem: the repository accumulated fourteen ad-hoc target directories totalling 22 GB because each task invented its own `CARGO_TARGET_DIR` to stop WSL and Windows artifacts colliding. Explicit `--target` removes the need for any of them.
 
 Windows-on-ARM emulates x64, so one ARM64 Windows host builds and tests both targets. The matrix doubles in wall-clock time, not in machines.
 
