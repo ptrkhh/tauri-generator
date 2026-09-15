@@ -1,6 +1,8 @@
 use serde_json::Value;
 use std::fmt;
+use std::fs::{self, OpenOptions};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use editpe::{
     constants::{CODE_PAGE_ID_EN_US, LANGUAGE_ID_EN_US, RT_RCDATA},
@@ -167,6 +169,104 @@ pub fn read_metadata(path: &Path) -> Result<Metadata, PeError> {
         file_description,
         product_version,
     })
+}
+
+pub fn specialize(
+    input: &Path,
+    output: &Path,
+    spec: &[u8],
+    icon: &Path,
+    display_name: &str,
+    version: &str,
+) -> Result<Metadata, PeError> {
+    validate_spec(spec)?;
+    validate_text(display_name, "display-name")?;
+    validate_text(version, "version")?;
+    let input = input
+        .canonicalize()
+        .map_err(|error| PeError::Image(error.to_string()))?;
+    let output_parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = output_parent
+        .canonicalize()
+        .map_err(|error| PeError::Image(error.to_string()))?;
+    let output = parent.join(output.file_name().ok_or(PeError::InvalidPath)?);
+    if input == output {
+        return Err(PeError::InvalidPath);
+    }
+    let mut image = Image::parse_file(&input).map_err(|error| PeError::Image(error.to_string()))?;
+    edit_resources(&mut image, spec, icon, display_name, version)?;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut staged = None;
+    for _ in 0..32 {
+        let candidate = parent.join(format!(
+            ".webwrap-pe-{}-{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => {
+                staged = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(PeError::Image(error.to_string())),
+        }
+    }
+    let staged = staged.ok_or_else(|| PeError::Image("could not create staging file".into()))?;
+    let result = (|| {
+        image
+            .write_file(&staged)
+            .map_err(|error| PeError::Image(error.to_string()))?;
+        let staged_image =
+            Image::parse_file(&staged).map_err(|error| PeError::Image(error.to_string()))?;
+        drop(staged_image);
+        if read_embedded_spec(&staged)? != spec {
+            return Err(PeError::InvalidSpec(
+                "staged spec does not match input".into(),
+            ));
+        }
+        let metadata = read_metadata(&staged)?;
+        publish(&staged, &output)?;
+        Ok(metadata)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn publish(staged: &Path, output: &Path) -> Result<(), PeError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let source: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| PeError::Image(error.to_string()))
+}
+
+#[cfg(not(windows))]
+fn publish(_staged: &Path, _output: &Path) -> Result<(), PeError> {
+    Err(PeError::Image(
+        "Windows PE specialization requires Windows".into(),
+    ))
 }
 
 impl std::error::Error for PeError {}
