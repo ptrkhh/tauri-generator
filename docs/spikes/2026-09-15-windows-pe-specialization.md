@@ -7,9 +7,15 @@ This spike proves that `webwrap-pe-specialize.exe` can copy an immutable base
 PE, embed a `WEBWRAP_APP_SPEC` `RT_RCDATA` resource plus an icon and version
 strings, read all of that back from the staged file, and publish the result
 atomically without ever mutating the base binary in place — and that a
-runtime failure (bad input PE, missing icon) leaves any pre-existing output
-byte-for-byte unchanged with no temp file left behind. See "Scope boundary"
-at the end for what this does **not** prove.
+runtime failure leaves any pre-existing output byte-for-byte unchanged with
+no temp file left behind. That is proven for failures on both sides of the
+staging step: before staging (Probes 3a/3b — bad input PE, missing icon —
+which fail before a temp file is ever created, so byte-preservation is
+proven and temp-absence is trivial) and after staging (Probe 3c, added in a
+later fix-wave pass over this document — a publish-step failure that occurs
+only after a temp file has been created, written, flushed, and read back,
+proving the cleanup actually removes it). See "Scope boundary" at the end
+for what this does **not** prove.
 
 ## Build and environment
 
@@ -258,6 +264,89 @@ Both failure probes exited 1 (a runtime failure per the Task 3 CLI contract,
 not a usage error), left the previously published `twitter.exe`
 byte-for-byte unchanged, left the immutable base untouched, and left no
 `webwrap-pe-*` temp file behind.
+
+**Gap in probes 3a/3b:** both fail strictly before a temp file is ever
+created — 3a at `Image::parse_file` on the base input, 3b at
+`set_main_icon_file` while editing resources, both upstream of where
+`specialize()` first creates the `.webwrap-pe-*.tmp` staging file. (These
+were `pe.rs:207`, `pe.rs:86`, and `pe.rs:210` respectively when the original
+probes and the final whole-branch review ran; a later fix-wave cleanup pass
+removed some dead code in `specialize()` and shifted the later of those line
+numbers — the code paths are unchanged.) Neither probe could prove a temp
+file is actually *removed* on failure, because neither ever created one.
+Probe 3c below closes that gap.
+
+## Probe 3c: post-staging publish failure (fix-wave addendum)
+
+Added in a later fix-wave pass over this document (after the final
+whole-branch review returned "ready to merge: with fixes") specifically to
+substantiate the temp-file-removal half of the claim above. It forces a
+failure *after* staging by pointing `--output` at a path that already exists
+as a **directory**: the base PE parses, resources are edited, the temp file
+is written, flushed, and read back successfully, and only the final
+`MoveFileExW` publish step fails (Windows refuses to replace a directory
+with a file).
+
+Run against the same rebuilt binaries as above, from the same worktree.
+Base binary SHA-256 reconfirmed unchanged immediately before this probe:
+`689ae2aa3e75da0a561af36dd2a177418480e62a1bcb657050693d4a8cdb1884`.
+
+Setup — create a directory at the output path:
+
+```
+cmd.exe /d /v:on /c "mkdir C:\Users\p\AppData\Local\Temp\webwrap-blocked-output.exe & echo EXIT=!ERRORLEVEL!"
+```
+
+Observed: `EXIT=0` (directory created, confirmed empty via `dir`).
+
+Command:
+
+```
+cmd.exe /d /v:on /c "D:\git\pwa_ganerator\target\pe-specialization-x64\debug\webwrap-pe-specialize.exe specialize --input D:\git\pwa_ganerator\target\pe-specialization-x64\debug\photopea-windows-writeback-spike.exe --output C:\Users\p\AppData\Local\Temp\webwrap-blocked-output.exe --spec C:\Users\p\AppData\Local\Temp\webwrap-twitter-spec.json --icon D:\git\pwa_ganerator\.worktrees\photopea-windows-writeback\spikes\photopea-windows-writeback\icons\icon.png --display-name PostStagingProbe --version 5.0.0 & echo EXIT=!ERRORLEVEL!"
+```
+
+Observed stdout/stderr:
+
+```
+image error: Access is denied. (0x80070005)
+EXIT=1
+```
+
+This matches what the final whole-branch reviewer observed running the same
+probe against the pre-fix-wave binary (`Access is denied. (0x80070005)`,
+exit 1); the `image error: ` prefix is new in this session's output because
+the `PeError::Display` fix (see the fix-wave's code changes) landed before
+this probe was re-run against the rebuilt binary. The underlying failure —
+`MoveFileExW` returning `ERROR_ACCESS_DENIED` (`0x80070005`) because the
+destination exists as a directory — is unchanged.
+
+Post-probe checks:
+
+```
+cmd.exe /d /v:on /c "dir C:\Users\p\AppData\Local\Temp\webwrap-blocked-output.exe & echo EXIT=!ERRORLEVEL!"
+```
+
+Observed: the directory is still present and still empty (`0 File(s)`,
+`2 Dir(s)` — just `.` and `..`) — the destination was never replaced.
+
+```
+find /mnt/c/Users/p/AppData/Local/Temp/ -maxdepth 1 -iname '*webwrap-pe*'
+```
+
+Observed: no output — no `.webwrap-pe-*.tmp` staging file survived, even
+though this run did create, write, flush, and read one back before the
+publish step failed.
+
+Base binary SHA-256 reconfirmed unchanged after the probe:
+`689ae2aa3e75da0a561af36dd2a177418480e62a1bcb657050693d4a8cdb1884`.
+
+Cleanup: `rmdir C:\Users\p\AppData\Local\Temp\webwrap-blocked-output.exe`
+(`EXIT=0`).
+
+This substantiates the previously unproven half of the claim: when a
+failure occurs *after* the temp file has been created, `specialize()`'s
+cleanup (`fs::remove_file` on the `result.is_err()` path, `pe.rs:252` as of
+this fix wave) does remove it.
 
 ## Final repository checks (brief Step 5)
 
