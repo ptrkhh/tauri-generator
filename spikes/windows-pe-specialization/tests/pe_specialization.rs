@@ -1,11 +1,17 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use editpe::Image;
 use windows_pe_specialization_spike::pe::{edit_resources, read_metadata};
 
 fn temp_dir() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("webwrap-pe-test-{}", std::process::id()));
-    std::fs::create_dir_all(&path).unwrap();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "webwrap-pe-test-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&path).unwrap();
     path
 }
 
