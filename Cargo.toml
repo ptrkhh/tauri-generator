@@ -1,5 +1,4 @@
 [workspace]
-<<<<<<< HEAD
 members = [
     "spikes/vscode-webview2-handle",
     "spikes/photopea-windows-writeback",
