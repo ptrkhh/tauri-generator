@@ -4,7 +4,7 @@
 
 **Goal:** Prove on Windows that a Tauri/WebView2 wrapper can automatically open an OS-supplied local Markdown file in vscode.dev and that Ctrl+S changes the original file.
 
-**Architecture:** A minimal Windows-only Tauri executable validates one local path, injects a narrow showOpenFilePicker adapter into the top-level https://vscode.dev document, creates a genuine read/write FileSystemFileHandle through WebView2 COM, and delivers it as an additional web-message object. A trusted DevTools Protocol Ctrl+O event invokes VS Code's normal browser file-open path. A local probe page isolates WebView2 handle transfer from hosted VS Code behavior.
+**Architecture:** A minimal Windows-only Tauri executable validates one local path, injects a narrow showOpenFilePicker adapter into the top-level https://vscode.dev document, creates a genuine read/write FileSystemFileHandle through WebView2 COM, and delivers it as an additional web-message object. WebView2's embedded runtime intercepted synthetic Ctrl+O in the measured build, so a trusted DevTools Protocol command-palette sequence invokes the same VS Code “Open File...” action while preserving the user-facing open-file behavior. A local probe page isolates WebView2 handle transfer from hosted VS Code behavior.
 
 **Tech Stack:** Rust 2021, Tauri 2.11.5, WebView2 COM 0.38.2, plain JavaScript/HTML, Windows PowerShell.
 
@@ -33,10 +33,11 @@ This plan covers only the release-blocking vscode.dev feasibility spike. It excl
 - Create: spikes/vscode-webview2-handle/Cargo.toml — pinned spike dependencies.
 - Create: spikes/vscode-webview2-handle/build.rs — Tauri build hook.
 - Create: spikes/vscode-webview2-handle/tauri.conf.json — no default window, bundling, commands, or capabilities.
+- Create: spikes/vscode-webview2-handle/icons/icon.png — static source icon required by Tauri's context macro.
 - Create: spikes/vscode-webview2-handle/src/main.rs — path validation and window creation.
-- Create: spikes/vscode-webview2-handle/src/webview2_bridge.rs — origin checks, COM handle delivery, and Ctrl+O dispatch.
+- Create: spikes/vscode-webview2-handle/src/webview2_bridge.rs — origin checks, COM handle delivery, and Open File dispatch.
 - Create: spikes/vscode-webview2-handle/src/vscode.js — top-frame picker adapter and readiness handshake.
-- Create: spikes/vscode-webview2-handle/ui/probe.html — local write-through probe.
+- Create/modify: spikes/vscode-webview2-handle/ui/probe.html — local write-through probe.
 - Create after measurement: docs/spikes/2026-09-14-vscode-webview2-handle.md — pass/fail evidence.
 
 ---
@@ -51,7 +52,9 @@ This plan covers only the release-blocking vscode.dev feasibility spike. It excl
 - Create: spikes/vscode-webview2-handle/Cargo.toml
 - Create: spikes/vscode-webview2-handle/build.rs
 - Create: spikes/vscode-webview2-handle/tauri.conf.json
+- Create: spikes/vscode-webview2-handle/icons/icon.png
 - Create: spikes/vscode-webview2-handle/src/main.rs
+- Create: spikes/vscode-webview2-handle/ui/probe.html
 
 - [ ] **Step 1: Add workspace files**
 
@@ -112,6 +115,14 @@ fn main() {
   "bundle": { "active": false }
 }
 ~~~
+
+Create ui/probe.html as a minimal asset so Tauri's frontendDist exists while the crate is first compiled:
+
+~~~html
+<!doctype html><meta charset="utf-8"><title>Spike</title>
+~~~
+
+Add a small valid static PNG at icons/icon.png. It is only the development spike icon; the production generator later replaces embedded icons during packaging.
 
 - [ ] **Step 3: Write failing argument tests**
 
@@ -398,19 +409,7 @@ In probe mode:
 
 Ignore malformed, unknown, wrong-mode, and wrong-origin messages. Log COM failures to stderr and leave the window open showing failure. Never loosen the origin check.
 
-Finish main-window setup with:
-
-~~~rust
-let builder = WebviewWindowBuilder::new(app, "main", url)
-    .title("VS Code Handle Spike");
-let builder = if request.mode == Mode::Vscode {
-    builder.initialization_script(include_str!("vscode.js"))
-} else {
-    builder
-};
-let window = builder.build()?;
-webview2_bridge::install(&window, request.clone())?;
-~~~
+Keep the Task 1 window builder, then call webview2_bridge::install(&window, request.clone()) after build. Task 3 adds the vscode.js initialization script to this builder; do not reference that file before Task 3 creates it.
 
 - [ ] **Step 6: Run the native probe**
 
@@ -441,6 +440,7 @@ git commit -m "spike: prove WebView2 handle transfer"
 **Files:**
 
 - Create: spikes/vscode-webview2-handle/src/vscode.js
+- Modify: spikes/vscode-webview2-handle/src/main.rs
 - Modify: spikes/vscode-webview2-handle/src/webview2_bridge.rs
 
 - [ ] **Step 1: Add the top-frame picker adapter**
@@ -499,47 +499,42 @@ cargo run -p vscode-webview2-handle-spike -- $proof
 
 Expected: vscode.dev loads and queues a handle, but the file does not open automatically. Close the window.
 
-- [ ] **Step 3: Dispatch trusted Ctrl+O through WebView2**
+- [ ] **Step 3: Dispatch the Open File command through WebView2**
 
-Add:
+After the handle-ready acknowledgement, use WebView2's DevTools Protocol in a
+completion-callback chain:
 
-~~~rust
-use webview2_com::callback::CallDevToolsProtocolMethodCompletedHandler;
+1. Dispatch trusted Ctrl+Shift+P key-down/key-up events.
+2. Insert `Open File...` with `Input.insertText`.
+3. Use `Runtime.evaluate` to wait for the command-palette result to become
+   selected, with a bounded fail-closed deadline. This is a narrow
+   state-conditioned accessibility read, not a DOM click or selector-based
+   action.
+4. Dispatch trusted Enter key-down/key-up events only after the readiness
+   check succeeds.
 
-unsafe fn dispatch_ctrl_o(webview: &ICoreWebView2) -> windows::core::Result<()> {
-    let down = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
-    webview.CallDevToolsProtocolMethod(
-        windows::core::w!("Input.dispatchKeyEvent"),
-        windows::core::w!(
-            r#"{"type":"rawKeyDown","modifiers":2,"windowsVirtualKeyCode":79,"nativeVirtualKeyCode":79,"key":"o","code":"KeyO"}"#
-        ),
-        &down,
-    )?;
-    let up = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|status, _| status));
-    webview.CallDevToolsProtocolMethod(
-        windows::core::w!("Input.dispatchKeyEvent"),
-        windows::core::w!(
-            r#"{"type":"keyUp","modifiers":2,"windowsVirtualKeyCode":79,"nativeVirtualKeyCode":79,"key":"o","code":"KeyO"}"#
-        ),
-        &up,
-    )
-}
-~~~
+Re-read the current `sender.Source` before every step in the asynchronous
+chain and abort if the live top-level origin is no longer the expected
+`https://vscode.dev` page. Track idle, in-flight, completed, and failed open
+states so a repeated acknowledgement cannot duplicate the sequence and any
+callback/origin failure is observable.
 
 Handle webwrap-vscode-handle-ready only when:
 
 - mode is Mode::Vscode
 - handle_sent is true
-- open_triggered is false
+- the open state is idle
 - a fresh sender.Source check still passes
 
-Set open_triggered only after dispatch_ctrl_o returns Ok.
+Mark the sequence in-flight once the first CDP call is accepted; mark it
+completed only after the final key-up callback succeeds, and mark it failed on
+any callback, readiness, or origin error.
 
 - [ ] **Step 4: Confirm automatic open**
 
 Run the same PowerShell command. Do not press Ctrl+O or click Open File.
 
-Expected: a tab named webwrap-vscode-proof.md opens automatically and contains before. A browser picker, unopened tab, or ignored event fails the spike. Do not add DOM selectors or fixed timing delays.
+Expected: a tab named webwrap-vscode-proof.md opens automatically and contains before. A browser picker, unopened tab, or ignored event fails the spike. Do not use selectors or clicks to invoke the action, and do not rely on a fixed action delay; the command-palette readiness check must be state-conditioned.
 
 - [ ] **Step 5: Check and commit**
 
