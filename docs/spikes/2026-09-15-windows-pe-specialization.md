@@ -95,7 +95,8 @@ Resulting artifacts (sizes from `ls -la` against the WSL-mapped path):
 | `D:\git\pwa_ganerator\target\pe-specialization-x64\debug\photopea-windows-writeback-spike.exe` (immutable base) | 13,456,384 |
 
 Base binary SHA-256, confirmed identical before the first probe and after
-every probe below (five separate checks, all equal):
+every probe below (seven separate `sha256sum` checks across the session, all
+equal):
 
 ```
 689ae2aa3e75da0a561af36dd2a177418480e62a1bcb657050693d4a8cdb1884
