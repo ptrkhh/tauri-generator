@@ -274,7 +274,7 @@ pub fn app_identity(canonical_url: &str) -> String {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cargo test -p webwrap-spec`
-Expected: PASS, 6 tests.
+Expected: PASS, 5 tests.
 
 If `is_none_or` is unavailable, replace with `!url.host_str().is_some_and(|host| !host.is_empty())`.
 
@@ -467,7 +467,7 @@ pub use policy::{is_trusted_origin, nav_verdict, NavEvent, Verdict};
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p webwrap-spec`
-Expected: PASS, 12 tests.
+Expected: PASS, 11 tests (6 policy unit tests plus the 5 contract vectors).
 
 - [ ] **Step 5: Run the quality gates**
 
@@ -976,7 +976,7 @@ pub use schema::{Adapter, AppSpec, Assoc, DnsMode, SpecError, MAX_SPEC_BYTES};
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p webwrap-spec`
-Expected: PASS, 22 tests.
+Expected: PASS, 21 tests (16 unit tests plus the 5 contract vectors).
 
 Note on `appVersion`: `"1.0.0".parse::<u16>()` rejects a leading `+` and a leading `-`, so `"+1.0.0"` and `"-1.0.0"` fail as required. `"01.0.0"` is accepted; leading zeros are harmless because the value is written into a numeric PE `VERSIONINFO` field.
 
@@ -1144,7 +1144,7 @@ Add to the `impl AppSpec` block in `crates/webwrap-spec/src/schema.rs`, and add 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p webwrap-spec`
-Expected: PASS, 28 tests.
+Expected: PASS, 27 tests (22 unit tests plus the 5 contract vectors).
 
 - [ ] **Step 5: Run the quality gates**
 
