@@ -32,7 +32,7 @@ pub fn validate_spec(bytes: &[u8]) -> Result<Vec<u8>, PeError> {
         .ok_or_else(|| PeError::InvalidSpec("spec must be a JSON object".into()))?;
     if !object
         .get("schemaVersion")
-        .is_some_and(|value| value.as_i64().is_some())
+        .is_some_and(|value| value.as_i64().is_some() || value.as_u64().is_some())
     {
         return Err(PeError::InvalidSpec(
             "schemaVersion must be an integer".into(),
