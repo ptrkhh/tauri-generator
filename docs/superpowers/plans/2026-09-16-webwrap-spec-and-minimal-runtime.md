@@ -448,8 +448,7 @@ pub fn is_trusted_origin(trusted_origins: &[String], url: &str) -> bool {
     if !origin.is_tuple() {
         return false;
     }
-    let serialized = origin.ascii_serialization();
-    trusted_origins.iter().any(|trusted| *trusted == serialized)
+    trusted_origins.contains(&origin.ascii_serialization())
 }
 ```
 
