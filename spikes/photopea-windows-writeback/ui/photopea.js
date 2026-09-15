@@ -72,7 +72,13 @@
 
   const reportError = (reason, notifyNative = true) => {
     setStatus(`FAIL: ${reason}`);
-    if (notifyNative) bridge?.postMessage(messages.error);
+    if (notifyNative) {
+      try {
+        bridge?.postMessage(messages.error);
+      } catch {
+        // The status remains visible when the native channel itself failed.
+      }
+    }
   };
 
   const base64From = (buffer) => {
@@ -89,13 +95,18 @@
       reportError("Photopea save requested out of order");
       return;
     }
-    saveState = "requested";
-    bridge?.postMessage(messages.saveRequested);
+    const script = [
+      "(function(){",
+      "var source=app.activeDocument?app.activeDocument.source:null;",
+      'app.echoToOE(JSON.stringify({kind:"save-source",source:source}));',
+      `if(source===${JSON.stringify(sourceId)}){app.activeDocument.saveToOE("psd");}`,
+      "})();",
+    ].join("");
+    saveState = "checking-source";
     try {
-      frame.contentWindow.postMessage(
-        'app.activeDocument.saveToOE("psd");app.echoToOE(app.activeDocument.source);',
-        PHOTOPEA_ORIGIN,
-      );
+      if (!bridge) throw new Error("native bridge is unavailable");
+      bridge.postMessage(messages.saveRequested);
+      frame.contentWindow.postMessage(script, PHOTOPEA_ORIGIN);
     } catch (error) {
       saveState = "idle";
       reportError(`Photopea save request failed: ${error?.message || "unknown error"}`);
@@ -103,7 +114,8 @@
   };
 
   const handleExport = (buffer) => {
-    if (saveState !== "requested" || !sourceId || fileAssociation?.sourceId !== sourceId) {
+    if (saveState !== "awaiting-export" || !sourceId || fileAssociation?.sourceId !== sourceId) {
+      saveState = "idle";
       reportError("Photopea export arrived out of order");
       return;
     }
@@ -121,13 +133,17 @@
       return;
     }
     saveState = "awaiting-native";
-    bridge?.postMessage(
-      JSON.stringify({
+    try {
+      if (!bridge) throw new Error("native bridge is unavailable");
+      bridge.postMessage(JSON.stringify({
         type: "webwrap-photopea-save",
         source: sourceId,
         data: encoded,
-      }),
-    );
+      }));
+    } catch (error) {
+      saveState = "idle";
+      reportError(`PSD export delivery failed: ${error?.message || "unknown error"}`);
+    }
   };
 
   const reportOpened = () => {
@@ -272,6 +288,20 @@
     try {
       payload = JSON.parse(event.data);
     } catch {
+      return;
+    }
+    if (payload?.kind === "save-source") {
+      if (
+        saveState !== "checking-source" ||
+        typeof payload.source !== "string" ||
+        payload.source !== sourceId ||
+        fileAssociation?.sourceId !== sourceId
+      ) {
+        saveState = "idle";
+        reportError("Photopea active document does not match the local file");
+        return;
+      }
+      saveState = "awaiting-export";
       return;
     }
     if (

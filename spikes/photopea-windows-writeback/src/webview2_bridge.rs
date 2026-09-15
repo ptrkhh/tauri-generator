@@ -124,6 +124,10 @@ fn looks_like_save_message(wire: &str) -> bool {
         .is_some_and(|kind| kind == "webwrap-photopea-save")
 }
 
+fn is_recognized_message(wire: &str) -> bool {
+    decode_message(wire).is_some() || looks_like_save_message(wire)
+}
+
 fn source_is_allowed(source: &str) -> bool {
     let Ok(url) = tauri::Url::parse(source) else {
         return false;
@@ -363,7 +367,7 @@ pub fn install(window: &tauri::WebviewWindow, request: LaunchRequest) -> tauri::
             let message = take_pwstr(message);
             let save_payload = decode_save_message(&message);
             let decoded_message = decode_message(&message);
-            if save_payload.is_none() && decoded_message.is_none() {
+            if !is_recognized_message(&message) {
                 return Ok(());
             }
 
@@ -572,9 +576,9 @@ mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     use super::{
-        classify_message, decode_message, decode_save_message, source_is_allowed,
-        sources_allow_action, write_psd_atomically, BridgeMessage, MAX_PSD_BASE64_BYTES,
-        OPEN_HANDLE_RECEIVED, OPEN_HANDLE_SENT, OPEN_IDLE, OPEN_OPENED,
+        classify_message, decode_message, decode_save_message, is_recognized_message,
+        source_is_allowed, sources_allow_action, write_psd_atomically, BridgeMessage,
+        MAX_PSD_BASE64_BYTES, OPEN_HANDLE_RECEIVED, OPEN_HANDLE_SENT, OPEN_IDLE, OPEN_OPENED,
     };
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -714,6 +718,7 @@ mod tests {
         let wire = serde_json::to_string(&serde_json::to_string(&inner).unwrap()).unwrap();
 
         assert!(decode_save_message(&wire).is_none());
+        assert!(!is_recognized_message(&wire));
     }
 
     #[test]
@@ -730,6 +735,7 @@ mod tests {
         ] {
             let wire = serde_json::to_string(&serde_json::to_string(&inner).unwrap()).unwrap();
             assert!(decode_save_message(&wire).is_none());
+            assert!(is_recognized_message(&wire));
         }
     }
 
@@ -738,6 +744,7 @@ mod tests {
         let wire = save_wire("webwrap-local:image.psd:token", "not base64");
 
         assert!(decode_save_message(&wire).is_none());
+        assert!(is_recognized_message(&wire));
     }
 
     #[test]
@@ -746,6 +753,7 @@ mod tests {
         let wire = save_wire("webwrap-local:image.psd:token", &oversized);
 
         assert!(decode_save_message(&wire).is_none());
+        assert!(is_recognized_message(&wire));
     }
 
     #[test]
@@ -756,6 +764,21 @@ mod tests {
         );
 
         assert!(decode_save_message(&wire).is_none());
+        assert!(is_recognized_message(&wire));
+    }
+
+    #[test]
+    fn raw_or_unknown_save_envelopes_are_ignored() {
+        assert!(!is_recognized_message(
+            r#"{"type":"webwrap-photopea-save","source":"webwrap-local:image.psd:token","data":"OEJQUw=="}"#,
+        ));
+        assert!(!is_recognized_message(
+            &save_wire(
+                "webwrap-local:image.psd:token",
+                &STANDARD.encode(valid_psd(b"fixture")),
+            )
+            .replace("webwrap-photopea-save", "webwrap-photopea-other")
+        ));
     }
 
     #[test]
@@ -787,14 +810,20 @@ mod tests {
     }
 
     #[test]
-    fn failed_destination_replace_leaves_existing_destination_untouched() {
+    fn read_only_destination_replace_leaves_existing_file_untouched() {
         let dir = temp_dir("replace-failure");
         let path = dir.join("image.psd");
-        std::fs::create_dir(&path).unwrap();
+        let original = b"8BPS original";
+        std::fs::write(&path, original).unwrap();
+        let writable_permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut read_only_permissions = writable_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        std::fs::set_permissions(&path, read_only_permissions).unwrap();
 
         assert!(write_psd_atomically(&path, &valid_psd(b"replacement")).is_err());
 
-        assert!(path.is_dir());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::set_permissions(&path, writable_permissions).unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
