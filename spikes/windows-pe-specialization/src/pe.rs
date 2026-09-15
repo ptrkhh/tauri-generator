@@ -24,12 +24,12 @@ pub enum PeError {
 impl fmt::Display for PeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidSpec(message)
-            | Self::InvalidText(message)
-            | Self::MissingResource(message)
-            | Self::Resource(message)
-            | Self::Image(message) => f.write_str(message),
+            Self::InvalidSpec(message) => write!(f, "invalid spec: {message}"),
+            Self::InvalidText(message) => write!(f, "invalid text: {message}"),
             Self::InvalidPath => f.write_str("invalid path"),
+            Self::MissingResource(message) => write!(f, "missing resource: {message}"),
+            Self::Resource(message) => write!(f, "resource error: {message}"),
+            Self::Image(message) => write!(f, "image error: {message}"),
         }
     }
 }
@@ -95,6 +95,9 @@ pub fn edit_resources(
             strings: Default::default(),
         });
     }
+    // ponytail: only strings[0] is updated; a base PE with more than one
+    // VersionStringTable would keep stale values in the rest. Latent with
+    // the current single-table base.
     let strings = &mut info.strings[0].strings;
     for (key, value) in [
         ("FileDescription", display_name),
@@ -154,15 +157,9 @@ pub fn read_metadata(path: &Path) -> Result<Metadata, PeError> {
             .cloned()
             .ok_or_else(|| PeError::MissingResource(key.into()))
     };
-    for key in [
-        "FileDescription",
-        "ProductName",
-        "FileVersion",
-        "ProductVersion",
-    ] {
-        find_string(key)?;
-    }
     let file_description = find_string("FileDescription")?;
+    find_string("ProductName")?;
+    find_string("FileVersion")?;
     let product_version = find_string("ProductVersion")?;
     Ok(Metadata {
         spec,
@@ -242,9 +239,6 @@ pub fn specialize(
     })();
     drop(staged_file);
     let result = result.and_then(|()| {
-        let staged_image =
-            Image::parse_file(&staged).map_err(|error| PeError::Image(error.to_string()))?;
-        drop(staged_image);
         if read_embedded_spec(&staged)? != spec {
             return Err(PeError::InvalidSpec(
                 "staged spec does not match input".into(),
@@ -260,7 +254,6 @@ pub fn specialize(
     result
 }
 
-#[cfg(windows)]
 fn publish(staged: &Path, output: &Path) -> Result<(), PeError> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
@@ -277,13 +270,6 @@ fn publish(staged: &Path, output: &Path) -> Result<(), PeError> {
         )
     }
     .map_err(|error| PeError::Image(error.to_string()))
-}
-
-#[cfg(not(windows))]
-fn publish(_staged: &Path, _output: &Path) -> Result<(), PeError> {
-    Err(PeError::Image(
-        "Windows PE specialization requires Windows".into(),
-    ))
 }
 
 impl std::error::Error for PeError {}
