@@ -52,15 +52,31 @@ Verification run on the merged result with the native MSVC environment:
 
 The Windows PE specialization spike is finished. Task 3 was re-reviewed at `b4c537b` and passed. Task 4 ran the planned Windows acceptance probe and its evidence is recorded in [`docs/spikes/2026-09-15-windows-pe-specialization.md`](docs/spikes/2026-09-15-windows-pe-specialization.md) (commits `12e27b1`, `3423904`). A final whole-branch review then ran over the complete spike and returned "ready to merge: with fixes"; those fixes were applied in a dedicated fix-wave pass (`cc9d3af`, `545b0b3`, `4479b3f`, merged in `c6fe72e`; fix-wave report at `.superpowers/sdd/2026-09-15-windows-pe-specialization-spike/final-fix-report.md`, git-ignored/local only) — code cleanup, a stronger post-staging cleanup test, a CLI exit-code integration test, and a new probe substantiating the temp-file-removal claim in the evidence doc.
 
-There is no more work scoped to this spike. The next work is the follow-on plans this spike does not cover, and they need their own brainstorming/planning session before implementation starts:
+There is no more work scoped to this spike.
 
-- Runtime self-reading of the embedded `WEBWRAP_APP_SPEC` resource (the spike only proves external read-back via `inspect`, not the produced executable configuring itself at runtime).
-- File-association registration (registry entries, "Open with" integration) per the product decisions below.
-- Code signing (Authenticode or otherwise) of the produced executable.
-- APK generation / Android packaging.
-- DNS enforcement (the custom-DoH-or-fail-closed behavior described below).
-- Icon search/selection (this spike only accepts one already-chosen PNG path).
-- Generator UX (the user-facing flow that drives packaging from a wizard or web UI).
+## Immediate next step: implement sub-project A+B
+
+The follow-on work was brainstormed on 2026-09-16 and the Windows track is now decomposed into six sub-projects, each getting its own spec, plan, and implementation cycle. APK generation, custom DNS, and code signing are deferred to phase 2.
+
+| | Sub-project | Content | Gates | Spec |
+| --- | --- | --- | --- | --- |
+| A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | [written](docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md) |
+| B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | same doc |
+| C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (exe half) | not written |
+| D | File bridge and adapters | port both WebView2 bridges, Photopea and `vscode.dev`, single-instance IPC | 6, 7, 8, save half of 4 and 5 | not written |
+| E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not written |
+| F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not written |
+
+**A+B is specced and awaiting an implementation plan.** Read [`docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md`](docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md) in full, then invoke the writing-plans skill. Do not start implementing before the plan exists.
+
+Spikes are now deleted by whichever sub-project ports them, not all at once. `spikes/` is untouched by A and B; C removes `windows-pe-specialization`, D removes both WebView2 spikes. B's integration test depends on the PE spike binary still being present.
+
+## Environment notes for the implementing session
+
+**Run this work from Windows, not WSL.** Sub-project B is `compile_error!` off Windows and needs the MSVC toolchain plus WebView2; none of it builds or tests under WSL, and this WSL host is `aarch64` Linux. The Windows side has both toolchains installed and the same plugin set. Sub-project A is pure Rust and runs anywhere.
+
+- **Always pass `--target` explicitly.** `rust-toolchain.toml` pins `channel = "stable"` but no target list, so on this ARM64 host a naive `cargo build` yields an aarch64 binary while every spike's evidence was gathered on x64 MSVC. The spec adds `targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]`; generated executables target both architectures.
+- **Explicit `--target` also fixes the target directory.** Artifacts land in `target/<triple>/` instead of clobbering WSL host artifacts in shared `target/debug`. That clobbering is why the repository accumulated fourteen ad-hoc target directories totalling 22 GB. The thirteen stale ones (`photopea-x64`, `task3-review`, `merge-x64`, and similar) are reclaimable but have not been deleted.
 
 ## Resume guardrails
 
