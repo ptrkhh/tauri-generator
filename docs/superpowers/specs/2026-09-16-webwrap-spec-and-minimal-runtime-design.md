@@ -105,7 +105,7 @@ JSON, `#[serde(deny_unknown_fields)]`, `#[serde(rename_all = "camelCase")]`, sto
 | --- | --- | --- |
 | `schemaVersion` | `u32` | must equal `1` exactly |
 | `appId` | `String` | exactly 16 lowercase hex characters |
-| `displayName` | `String` | 1-255 characters, no control characters, no NUL |
+| `displayName` | `String` | 1-255 **bytes**, not blank, no control characters, no invisible or bidi-control characters |
 | `slug` | `String` | `[a-z0-9-]`, 1-64 characters, no leading or trailing `-`, not a Windows reserved device name |
 | `launchUrl` | `String` | canonical `https` URL |
 | `trustedOrigins` | `Vec<String>` | non-empty, each `https://host[:port]` with no path, query, or fragment, no duplicates |
@@ -124,6 +124,7 @@ JSON, `#[serde(deny_unknown_fields)]`, `#[serde(rename_all = "camelCase")]`, sto
 
 Field-level notes that are requirements, not preferences:
 
+- **`displayName` is bounded in bytes, not characters.** The PE specializer it feeds bounds `display-name` with `value.len() > 255`. A character bound here would accept a 255-character CJK name — 765 bytes — that then fails during resource editing, putting the error in the wrong sub-project and far from the field the user typed. Invisible and bidi-control code points are rejected too: `char::is_control` is false for a right-to-left override, which would otherwise reach the window title and the PE `FileDescription` and make a name read as something else.
 - **`slug` becomes a filename.** Rejecting the Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, case-insensitive, with or without extension) prevents the generator from being asked to publish `nul.exe`.
 - **`appVersion` components are `u16`** because the PE `VERSIONINFO` resource stores four 16-bit fields. The specification carries three components; the fourth is written as `0` during specialization.
 - **`trustedOrigins` entries carry no trailing slash; `launchUrl` does.** An origin is `https://www.photopea.com` while the canonical launch URL for the same site is `https://www.photopea.com/`, because canonicalization normalizes an empty path to `/` and an origin has no path at all. This asymmetry is deliberate, and comparing the two as strings is a defect — derive the origin from the URL before comparing.
@@ -152,6 +153,10 @@ Canonicalization, in order:
 8. Preserve path, query, and fragment as meaningful components.
 9. Serialize back to a string. That string is the canonical URL.
 
+Step 1 detects a scheme only in the portion before the first `/`, `?`, or `#`, and treats a purely numeric remainder as a port rather than a scheme so that `twitter.com:8443` still gains the prefix. A substring test for `"://"` is wrong in both directions: it misses a single-slash typo, so `http:/example.com` becomes `https://http/example.com` with a host fabricated from the scheme text, and it fires on a schemeless URL carrying an absolute URL in its query or fragment, refusing `example.com/?next=https://other.test` — exactly the shape of a Photopea or vscode.dev deep link.
+
+Several spellings that a user may mean as one site canonicalize distinctly and therefore get distinct identities: a trailing-dot host (`example.com.`), an empty-but-present query or fragment (`example.com/?`), and `example..com`. The `url` crate and browsers agree on all of them, so the behaviour is deliberate and inherited rather than chosen — but identity is permanent, so it is recorded here rather than discovered later.
+
 Identity is `sha256(canonical_url_bytes)`, hex-encoded, truncated to the first 16 lowercase characters — 64 bits, which puts birthday collision well beyond any plausible number of generated apps for a personal tool.
 
 The hash must be a cryptographic digest, not `std::collections::hash_map::DefaultHasher`. `DefaultHasher`'s output is explicitly not stable across Rust releases, and identity must remain stable forever: it determines whether regenerating a URL updates the existing app or creates a second one, and on Android it becomes part of the application ID.
@@ -168,7 +173,8 @@ Conflating the two would break authentication: an OAuth redirect to an identity 
 | --- | --- | --- |
 | top-level navigation, `https` | Allow | stays in the app; login redirects work |
 | top-level navigation, any other scheme | Block | release gate 14 |
-| new window or `target="_blank"` | Open in system browser | parent design's pop-up rule |
+| new window or `target="_blank"`, `https` or `http` | Open in system browser | parent design's pop-up rule |
+| new window, any other scheme | Block | see below |
 | file-bridge delivery (consumed by D) | Allow only if origin is in `trustedOrigins` | native capability boundary |
 
 `policy.rs` exposes two independent functions:
@@ -178,7 +184,14 @@ Conflating the two would break authentication: an OAuth redirect to an identity 
 
 Both are defined and tested in A even though the bridge predicate is first used in D, so that `trustedOrigins` has enforced semantics from the moment the field exists rather than sitting unvalidated for two sub-projects.
 
+**Only `http` and `https` pop-ups may open externally.** The parent design says "**external** pop-up links open in the system browser", and the qualifier is load-bearing: `OpenExternally` becomes a shell open in the runtime, so an unrestricted verdict would let remote page content choose which registered Windows protocol handler launches — the `ms-msdt:` and `search-ms:` class of problem. `http` is safe to hand over because the system browser, not this app, renders it. Every other scheme is blocked, which also means the runtime needs no scheme allowlist of its own; the verdict already carries the decision.
+
 Certificate errors are never bypassed. The runtime adds no override of WebView2's default certificate handling.
+
+Two known consequences, recorded rather than solved:
+
+- **Pop-up-based OAuth does not complete.** A `window.open` to an identity provider is sent to the system browser, where the `postMessage` back to its opener cannot arrive. Redirect-based login works, because that is a top-level navigation and stays in the app. If a target site turns out to support only pop-up login, sub-project D must revisit this rather than widening the pop-up rule.
+- **`about:blank` and `blob:` top-level navigations are blocked.** This is correct by the scheme rule but has not been observed against a live WebView2. Sub-project B verifies it before the policy is wired to `on_navigation`; if WebView2 or Tauri performs an `about:blank` navigation during startup, the rule needs a narrow exception for it.
 
 ## Runtime startup
 
@@ -270,7 +283,9 @@ Adding `targets = [...]` to `rust-toolchain.toml` was considered and rejected. T
 
 Explicit `--target` is load-bearing beyond correctness: it routes artifacts into `target/<triple>/`, whereas `rustup run <toolchain> cargo build` on a matching host writes to plain `target/debug` — which is precisely how WSL and Windows artifacts came to clobber each other.
 
-This also clears an existing problem: the repository accumulated fourteen ad-hoc target directories totalling 22 GB because each task invented its own `CARGO_TARGET_DIR` to stop WSL and Windows artifacts colliding. Explicit `--target` removes the need for any of them.
+This also clears most of an existing problem: the repository accumulated fourteen ad-hoc target directories totalling 22 GB because each task invented its own `CARGO_TARGET_DIR` to stop WSL and Windows artifacts colliding. Explicit `--target` removes the need for any of them for *compiled* artifacts.
+
+It does not remove the collision entirely, and the difference matters for sub-project B. With `--target` set, build scripts and proc macros are still compiled for the **host** and still land in plain `target/debug`, which the WSL and Windows toolchains continue to share. `tauri-build` is a build dependency, so Task 5 exercises exactly this. Cargo's metadata hashing should keep filenames distinct rather than corrupt anything, but the assumption is unverified and `target/` sits on a 92%-full disk — so Task 5 confirms it rather than inheriting it. Building into a target directory on a different filesystem sidesteps the question altogether, which is what the WSL side of this work did.
 
 Windows-on-ARM emulates x64, so one ARM64 Windows host builds and tests both targets. The matrix doubles in wall-clock time, not in machines.
 

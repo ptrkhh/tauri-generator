@@ -10,6 +10,25 @@
 
 **Spec:** [`docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md`](../specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md)
 
+## Status
+
+**Tasks 1-4 (sub-project A) are implemented, reviewed, and committed on branch `feat/webwrap-spec-and-runtime`.** 38 tests pass; clippy `-D warnings` and rustfmt are clean.
+
+A code review then found four Important defects, all confirmed by probing real behaviour, all fixed in `c257774`. The fixes changed the implementation away from the code blocks in Tasks 1-4 below:
+
+| Was | Now |
+| --- | --- |
+| scheme detected by `contains("://")` | scheme detected only before the first `/`, `?`, `#`, with a numeric remainder treated as a port |
+| `displayName` bounded in characters | bounded in **bytes**, to match the PE specializer |
+| every new window returned `OpenExternally` | only `http` and `https`; every other scheme is blocked |
+| `appVersion` parsed with `parse::<u16>()` alone | components verified all-ASCII-digits first, since `"+1".parse::<u16>()` is `Ok(1)` |
+
+Plus: invisible and bidi-control characters rejected in display text, MIME parts required to be RFC 2045 tokens beginning alphanumerically, `launchUrl` length bounded, `com0`/`lpt0` added to the reserved device names, `validate_fields` made private, and `rust-version = "1.82"` pinned.
+
+**The Tasks 1-4 code blocks below are the original plan and are now historical.** Read `crates/webwrap-spec/` for current behaviour; it is the source of truth. They are kept because Tasks 5-9 reference the types and reasoning they establish.
+
+**Start at Task 5.**
+
 ## Global Constraints
 
 - **Tasks 1-4 run under WSL.** `cargo test -p webwrap-spec` with no `--target` flag. No Windows needed.
@@ -32,7 +51,6 @@
 | File | Responsibility |
 | --- | --- |
 | `Cargo.toml` | modify: workspace members glob |
-| `rust-toolchain.toml` | modify: add both Windows target triples |
 | `crates/webwrap-spec/Cargo.toml` | create: pure crate manifest |
 | `crates/webwrap-spec/src/lib.rs` | create: `forbid(unsafe_code)`, module wiring, re-exports |
 | `crates/webwrap-spec/src/identity.rs` | create: `canonicalize_url`, `app_identity`, `IdentityError` |
@@ -978,7 +996,7 @@ pub use schema::{Adapter, AppSpec, Assoc, DnsMode, SpecError, MAX_SPEC_BYTES};
 Run: `cargo test -p webwrap-spec`
 Expected: PASS, 21 tests (16 unit tests plus the 5 contract vectors).
 
-Note on `appVersion`: `"1.0.0".parse::<u16>()` rejects a leading `+` and a leading `-`, so `"+1.0.0"` and `"-1.0.0"` fail as required. `"01.0.0"` is accepted; leading zeros are harmless because the value is written into a numeric PE `VERSIONINFO` field.
+Note on `appVersion`: **Rust's unsigned `FromStr` accepts a leading `+`** — `"+1".parse::<u16>()` is `Ok(1)`, measured, not assumed. A `parse::<u16>()` check alone therefore lets `"+1.0.0"` through to the PE `FileVersion` string verbatim. Each component must be verified all-ASCII-digits *before* parsing. A leading `-` is rejected by `parse` alone, but relying on that asymmetry is not worth the reader's confusion. `"01.0.0"` is accepted; leading zeros are harmless because the value is written into a numeric PE `VERSIONINFO` field.
 
 - [ ] **Step 5: Run the quality gates**
 
@@ -2145,7 +2163,13 @@ fn run(spec: AppSpec, data_dir: PathBuf) -> ! {
 
 If Task 7 chose the builder method, pass `data_dir` to it here instead of the `let _ =` line and delete that line.
 
-**New-window handling:** the constant `OpenExternally` verdict needs a handler that hands the URL to the system browser. Check whether `tauri` 2.11.5 exposes a new-window hook on `WebviewWindowBuilder`. If it does, wire it to `tauri_plugin_opener` or `ShellExecuteW`. If it does **not**, leave it unwired and record that in the evidence document: the policy is defined and unit-tested, and sub-project D already reaches the platform webview through `with_webview` for the file bridge, which is the natural place to install the handler. Do not add a new dependency for this in sub-project B.
+- [ ] **Step 5a: Verify `about:blank` does not break startup**
+
+`nav_verdict` returns `Block` for `about:blank` and for `blob:`, which is correct by the scheme rule but has never been observed against a live WebView2. If WebView2 or Tauri performs an `about:blank` top-level navigation while the window is being created, `on_navigation` will refuse it and the runtime may fail to start or show a blank window.
+
+Launch the specialized executable and confirm the site actually loads. If it does not, log every URL `on_navigation` receives before returning a verdict, and check whether `about:blank` appears during startup. If it does, add a narrow exception for exactly `about:blank` — not for the whole `about:` scheme, and not for `blob:` — and record the observed navigation sequence in the evidence document. Do not widen the rule further than the observation requires.
+
+**New-window handling:** `OpenExternally` is returned only for `http` and `https`; every other scheme already comes back as `Block`, so the handler needs no scheme allowlist of its own — the verdict carries that decision. The handler hands the URL to the system browser. Check whether `tauri` 2.11.5 exposes a new-window hook on `WebviewWindowBuilder`. If it does, wire it to `tauri_plugin_opener` or `ShellExecuteW`. If it does **not**, leave it unwired and record that in the evidence document: the policy is defined and unit-tested, and sub-project D already reaches the platform webview through `with_webview` for the file bridge, which is the natural place to install the handler. Do not add a new dependency for this in sub-project B.
 
 - [ ] **Step 6: Build both targets and run the full suite**
 
