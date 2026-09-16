@@ -54,30 +54,37 @@ The Windows PE specialization spike is finished. Task 3 was re-reviewed at `b4c5
 
 There is no more work scoped to this spike.
 
-## Immediate next step: implement sub-project A+B
+## Immediate next step: implement sub-project B, on Windows
 
 The follow-on work was brainstormed on 2026-09-16 and the Windows track is now decomposed into six sub-projects, each getting its own spec, plan, and implementation cycle. APK generation, custom DNS, and code signing are deferred to phase 2.
 
-| | Sub-project | Content | Gates | Spec |
+| | Sub-project | Content | Gates | State |
 | --- | --- | --- | --- | --- |
-| A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | [written](docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md) |
-| B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | same doc |
-| C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (exe half) | not written |
-| D | File bridge and adapters | port both WebView2 bridges, Photopea and `vscode.dev`, single-instance IPC | 6, 7, 8, save half of 4 and 5 | not written |
-| E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not written |
-| F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not written |
+| A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | **done**, reviewed, 38 tests |
+| B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **next** — specced and planned |
+| C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (exe half) | not specced |
+| D | File bridge and adapters | port both WebView2 bridges, Photopea and `vscode.dev`, single-instance IPC | 6, 7, 8, save half of 4 and 5 | not specced |
+| E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
+| F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
-**A+B is specced and awaiting an implementation plan.** Read [`docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md`](docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md) in full, then invoke the writing-plans skill. Do not start implementing before the plan exists.
+**Start at Task 5 of [`docs/superpowers/plans/2026-09-16-webwrap-spec-and-minimal-runtime.md`](docs/superpowers/plans/2026-09-16-webwrap-spec-and-minimal-runtime.md).** Read that plan's Status section first — it lists how the shipped crate differs from the plan's own Tasks 1-4 code blocks after review fixes. Read the spec too: [`docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md`](docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md).
 
-Spikes are now deleted by whichever sub-project ports them, not all at once. `spikes/` is untouched by A and B; C removes `windows-pe-specialization`, D removes both WebView2 spikes. B's integration test depends on the PE spike binary still being present.
+Sub-project A shipped `crates/webwrap-spec`: the `AppSpec` schema and validation, URL canonicalization, stable app identity, and navigation policy. Pure Rust, `forbid(unsafe_code)`, no Tauri or Windows dependency, so its whole suite runs anywhere. **`crates/webwrap-spec/tests/vectors.rs` is a permanent contract** — the identity of a URL decides whether regeneration updates an app or creates a second one. A failing vector means the implementation regressed, never that the vector needs updating.
+
+Spikes are deleted by whichever sub-project ports them, not all at once. `spikes/` is untouched by A and B; C removes `windows-pe-specialization`, D removes both WebView2 spikes. **B's integration test shells out to the PE spike's `webwrap-pe-specialize` binary to build its fixture**, so that spike must stay until C replaces it — at which point `specializer_path()` in `crates/webwrap-runtime/tests/inspect_self.rs` is the single line to repoint.
 
 ## Environment notes for the implementing session
 
-**Run this work from Windows, not WSL.** Sub-project B is `compile_error!` off Windows and needs the MSVC toolchain plus WebView2; none of it builds or tests under WSL, and this WSL host is `aarch64` Linux. The Windows side has both toolchains installed and the same plugin set. Sub-project A is pure Rust and runs anywhere.
+**Run sub-project B from Windows, not WSL.** It is `compile_error!` off Windows and needs the MSVC toolchain plus WebView2; none of it builds or tests under WSL, and this WSL host is `aarch64` Linux. The Windows side has both toolchains installed and the same plugin set.
 
-- **Always pass `--target` explicitly.** `rust-toolchain.toml` pins `channel = "stable"` but no target list, so on this ARM64 host a naive `cargo build` yields an aarch64 binary while every spike's evidence was gathered on x64 MSVC. The spec adds `targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]`; generated executables target both architectures.
-- **Explicit `--target` also fixes the target directory.** Artifacts land in `target/<triple>/` instead of clobbering WSL host artifacts in shared `target/debug`. That clobbering is why the repository accumulated fourteen ad-hoc target directories totalling 22 GB. The thirteen stale ones (`photopea-x64`, `task3-review`, `merge-x64`, and similar) are reclaimable but have not been deleted.
+- **`rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc` once**, then pass `--target` on every command. `rust-toolchain.toml` deliberately carries no `targets` key: that key only controls what rustup installs, it does not change the default build target, and it would force the WSL toolchain to download two Windows standard libraries it never uses. On this ARM64 host a naive `cargo build` silently yields an aarch64 binary while every spike's evidence was gathered on x64 MSVC. Generated executables target both architectures.
+- **`D:` is 92% full — about 24 GB free, and `target/` is 22 GB of it.** A WSL build into `/mnt/d` failed with `ENOMEM`; sub-project A was built with `CARGO_TARGET_DIR=$HOME/.cache/webwrap-target` instead. Thirteen of the fourteen `target/*` directories (`photopea-x64`, `task3-review`, `merge-x64`, and similar) are stale output from earlier review checkpoints and are reclaimable. Nobody has deleted them; that is the user's call.
+- **Explicit `--target` separates *compiled* artifacts into `target/<triple>/`, but not build scripts and proc macros**, which still compile for the host into plain `target/debug`. `tauri-build` is a build dependency, so Task 5 hits this. Cargo's metadata hashing should keep filenames distinct, but that is unverified — Task 5 confirms it rather than assuming it.
 
 ## Resume guardrails
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
+
+Sub-project A closes no release gate. B closes gates 11 and 14 only. Gates 1, 4, 5, 6, 7, and 8 belong to C, D, and E and must not be described as proven before then.
+
+One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.
