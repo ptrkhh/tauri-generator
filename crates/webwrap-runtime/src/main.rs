@@ -142,8 +142,20 @@ fn run(spec: AppSpec, data_dir: PathBuf) -> ! {
                     }
                     NewWindowResponse::Deny
                 })
-                .build()?;
-            use_main_icon(window.hwnd()?);
+                .build();
+            // Tauri turns an Err from setup into a panic, which a release
+            // build cannot show, so failures here must abort directly.
+            let window = match window {
+                Ok(window) => window,
+                Err(error) => fatal::abort(
+                    &format!("the app window could not be opened: {error}"),
+                    true,
+                ),
+            };
+            // Only the icon depends on this; the app still works without it.
+            if let Ok(hwnd) = window.hwnd() {
+                use_main_icon(hwnd);
+            }
             Ok(())
         })
         .run(tauri::generate_context!());
@@ -158,7 +170,15 @@ fn run(spec: AppSpec, data_dir: PathBuf) -> ! {
 }
 
 fn main() {
-    let mode = match parse_args(std::env::args().skip(1)) {
+    // args() would panic on a non-Unicode argument; that is a usage error.
+    let args: Result<Vec<String>, _> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.into_string())
+        .collect();
+    let mode = match args
+        .map_err(|_| "arguments must be valid Unicode".to_string())
+        .and_then(parse_args)
+    {
         Ok(mode) => mode,
         Err(error) => {
             eprintln!("{error}");

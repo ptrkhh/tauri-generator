@@ -257,6 +257,12 @@ fn unknown_arguments_are_a_usage_error() {
             "args {args:?} should be usage errors"
         );
     }
+
+    // A lone UTF-16 surrogate is a valid Windows argument but not a String.
+    use std::os::windows::ffi::OsStringExt;
+    let lone_surrogate = std::ffi::OsString::from_wide(&[0xD800]);
+    let out = Command::new(&exe).arg(lone_surrogate).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "non-Unicode argument");
 }
 
 #[test]
