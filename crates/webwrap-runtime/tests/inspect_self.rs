@@ -149,3 +149,111 @@ fn the_template_carries_the_resources_specialization_needs() {
     assert_eq!(report["fileDescription"], serde_json::json!("Photopea"));
     assert_eq!(report["productVersion"], serde_json::json!("1.0.0"));
 }
+
+fn inspect_self(exe: &Path, check_urls: &[&str]) -> serde_json::Value {
+    let mut command = Command::new(exe);
+    command.arg("--inspect-self");
+    for url in check_urls {
+        command.args(["--check-url", url]);
+    }
+    let out = command.output().unwrap();
+    assert!(
+        out.status.success(),
+        "--inspect-self failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn a_specialized_executable_reports_its_own_specification() {
+    let exe = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
+    let report = inspect_self(&exe, &[]);
+
+    assert_eq!(report["schemaVersion"], serde_json::json!(1));
+    assert_eq!(report["appId"], serde_json::json!("873756fbe97a1384"));
+    assert_eq!(report["displayName"], serde_json::json!("Photopea"));
+    assert_eq!(report["slug"], serde_json::json!("photopea"));
+    assert_eq!(
+        report["launchUrl"],
+        serde_json::json!("https://www.photopea.com/")
+    );
+    assert_eq!(
+        report["trustedOrigins"],
+        serde_json::json!(["https://www.photopea.com"])
+    );
+    assert_eq!(report["adapter"], serde_json::json!("photopea"));
+    assert_eq!(report["dnsMode"], serde_json::json!("system"));
+    assert_eq!(report["appVersion"], serde_json::json!("1.0.0"));
+    assert_eq!(
+        report["fileAssociations"][0]["extension"],
+        serde_json::json!(".psd")
+    );
+    // Derived from the running binary, never stored in the specification, so
+    // it cannot disagree with the actual executable.
+    let arch = report["runtimeArch"].as_str().unwrap();
+    assert!(
+        arch == "x86_64" || arch == "aarch64",
+        "unexpected arch {arch}"
+    );
+}
+
+#[test]
+fn renaming_and_moving_the_executable_does_not_break_the_read() {
+    let exe = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
+    let moved = unique("moved");
+    fs::create_dir_all(&moved).unwrap();
+    let renamed = moved.join("totally-different-name.exe");
+    fs::rename(&exe, &renamed).unwrap();
+
+    // The resource is read from the loaded image, not by reopening the file
+    // by its original path.
+    let report = inspect_self(&renamed, &[]);
+    assert_eq!(report["appId"], serde_json::json!("873756fbe97a1384"));
+}
+
+#[test]
+fn an_unspecialized_template_refuses_to_run() {
+    let out = Command::new(template_path())
+        .arg("--inspect-self")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("never specialized"),
+        "unhelpful message: {stderr}"
+    );
+}
+
+#[test]
+fn unknown_arguments_are_a_usage_error() {
+    let exe = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
+    for args in [
+        vec!["--nonsense"],
+        vec!["some-file.psd"],
+        vec!["--inspect-self", "--check-url"],
+        vec!["--inspect-self", "--check-url", "--nonsense"],
+        vec!["--inspect-self", "extra"],
+    ] {
+        let out = Command::new(&exe).args(&args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "args {args:?} should be usage errors"
+        );
+    }
+}
+
+#[test]
+fn a_specification_that_fails_validation_is_rejected_at_startup() {
+    // appId does not match launchUrl, so invariant 2 must reject it. The
+    // specializer's own weaker validator accepts this, which is exactly why
+    // the runtime revalidates.
+    let mismatched = PHOTOPEA_SPEC.replace("873756fbe97a1384", "0000000000000000");
+    let exe = specialize_fixture(&mismatched, "Photopea", "1.0.0");
+    let out = Command::new(&exe).arg("--inspect-self").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("appId"), "unhelpful message: {stderr}");
+}
