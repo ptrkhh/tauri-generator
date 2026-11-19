@@ -1,0 +1,79 @@
+# The runtime only builds and runs on Windows, so its tests run here rather
+# than on the Linux machine that writes the code.
+name: windows
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rustup if the image lacks it
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+            Invoke-WebRequest "https://static.rust-lang.org/rustup/dist/$arch-pc-windows-msvc/rustup-init.exe" -OutFile rustup-init.exe
+            .\rustup-init.exe -y --default-toolchain none --profile minimal
+            Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+          }
+      - run: rustup show active-toolchain
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo fmt --all -- --check
+      - run: cargo test -p webwrap-spec
+      - run: cargo build -p windows-pe-specialization-spike --target ${{ matrix.target }}
+      - run: cargo test -p webwrap-runtime --target ${{ matrix.target }}
+      - run: cargo clippy -p webwrap-spec -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Build the acceptance apps
+        shell: pwsh
+        env:
+          T: ${{ matrix.target }}
+        run: |
+          cargo build --release -p webwrap-runtime -p windows-pe-specialization-spike --target $env:T
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $bin = "target/$env:T/release"
+          $fx = "docs/windows-runs/fixtures"
+          New-Item -ItemType Directory acceptance | Out-Null
+          foreach ($app in @(@('Photopea', 'photopea', 'photopea-red'), @('Twitter', 'twitter', 'twitter-blue'))) {
+            & "$bin/webwrap-pe-specialize.exe" specialize --input "$bin/webwrap-runtime.exe" `
+              --output "acceptance/$($app[0]).exe" --spec "$fx/$($app[1]).json" --icon "$fx/$($app[2]).png" `
+              --display-name $app[0] --version 1.0.0
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          Copy-Item "$bin/webwrap-runtime.exe" acceptance/unspecialized-template.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-${{ matrix.target }}
+          path: acceptance/
+      - name: Smoke-launch both apps and check their WebView2 folders
+        shell: pwsh
+        run: |
+          $apps = @{ Photopea = '873756fbe97a1384'; Twitter = '2fa5e3f40150278f' }
+          $procs = foreach ($name in $apps.Keys) { Start-Process (Resolve-Path "acceptance/$name.exe") -PassThru }
+          Start-Sleep -Seconds 20
+          foreach ($p in $procs) { if ($p.HasExited) { throw "$($p.ProcessName) exited early with $($p.ExitCode)" } }
+          foreach ($id in $apps.Values) {
+            $dir = Join-Path $env:LOCALAPPDATA "WebWrap\$id\EBWebView"
+            if (-not (Test-Path $dir)) { throw "missing $dir" }
+            "ok: $dir"
+          }
+          # Tauri's default folder for the shared template identifier; using it would mean shared storage.
+          $shared = Join-Path $env:LOCALAPPDATA 'dev.webwrap.runtime\EBWebView'
+          if (Test-Path $shared) { throw "$shared exists, so the apps fell back to shared storage" }
+          $procs | Stop-Process -Force

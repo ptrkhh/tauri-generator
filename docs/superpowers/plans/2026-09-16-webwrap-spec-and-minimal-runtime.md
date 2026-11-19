@@ -27,7 +27,9 @@ Plus: invisible and bidi-control characters rejected in display text, MIME parts
 
 **The Tasks 1-4 code blocks below are the original plan and are now historical.** Read `crates/webwrap-spec/` for current behaviour; it is the source of truth. They are kept because Tasks 5-9 reference the types and reasoning they establish.
 
-**Start at Task 5.**
+**Task 5 deviations, found while implementing on cargo 1.100:** `build_dir()` in `tests/inspect_self.rs` derives the directory from `env!("CARGO_BIN_EXE_webwrap-runtime")` instead of the test's own path, because cargo 1.100's build-dir layout puts test binaries under `build/<pkg>/<hash>/out/` with no `deps/` directory. `TWITTER_SPEC` moves to Task 7, its first use, so no commit carries dead code. Code is written and cross-compiled on Linux with `cargo xwin`; tests run on Windows in `.github/workflows/windows.yml`.
+
+**Tasks 5-9 (sub-project B) are complete on branch `feat/webwrap-runtime` (2026-11-20).** Every deviation from the Tasks 5-8 code blocks below is listed, with source references, in `docs/evidence/2026-09-16-webwrap-spec-and-minimal-runtime.md` section 3. `crates/webwrap-runtime/` is the source of truth.
 
 ## Global Constraints
 

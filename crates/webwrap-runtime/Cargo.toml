@@ -1,0 +1,25 @@
+[package]
+name = "webwrap-runtime"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[dependencies]
+serde_json = "=1.0.151"
+tauri = "=2.11.5"
+webwrap-spec = { path = "../webwrap-spec" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "webwrap-runtime"
+path = "src/main.rs"

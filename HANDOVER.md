@@ -1,6 +1,6 @@
 # WebWrap handover
 
-Updated 2026-09-16. Both spikes below are finished, reviewed, and merged. A fresh Codex/Claude session should start here:
+Updated 2026-11-20. The spikes and sub-projects A and B are finished. A fresh Codex/Claude session should start here:
 
 - Work on `main` in the repository root. The `spike/photopea-windows-writeback` branch and its `.worktrees/photopea-windows-writeback` linked worktree were merged and removed; do not look for them.
 - Current code HEAD: check `git log -1 --format=%H` rather than trusting a hash recorded here, which goes stale as soon as the next commit lands.
@@ -48,43 +48,64 @@ Verification run on the merged result with the native MSVC environment:
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 - CLI specialize/inspect emit JSON with `specBytes`, `iconPresent`, `fileDescription`, and `productVersion`. Malformed spec content exits 2; a missing spec *file* exits 1 — that distinction is a fixed regression and is now pinned by `tests/cli_exit_codes.rs`.
 
-## Immediate next step: brainstorm/plan the follow-on work
+## Where things stand
 
-The Windows PE specialization spike is finished. Task 3 was re-reviewed at `b4c537b` and passed. Task 4 ran the planned Windows acceptance probe and its evidence is recorded in [`docs/spikes/2026-09-15-windows-pe-specialization.md`](docs/spikes/2026-09-15-windows-pe-specialization.md) (commits `12e27b1`, `3423904`). A final whole-branch review then ran over the complete spike and returned "ready to merge: with fixes"; those fixes were applied in a dedicated fix-wave pass (`cc9d3af`, `545b0b3`, `4479b3f`, merged in `c6fe72e`; fix-wave report at `.superpowers/sdd/2026-09-15-windows-pe-specialization-spike/final-fix-report.md`, git-ignored/local only) — code cleanup, a stronger post-staging cleanup test, a CLI exit-code integration test, and a new probe substantiating the temp-file-removal claim in the evidence doc.
-
-There is no more work scoped to this spike.
-
-## Immediate next step: implement sub-project B, on Windows
-
-The follow-on work was brainstormed on 2026-09-16 and the Windows track is now decomposed into six sub-projects, each getting its own spec, plan, and implementation cycle. APK generation, custom DNS, and code signing are deferred to phase 2.
+The follow-on work was brainstormed on 2026-09-16. The Windows track is split into six sub-projects, each with its own spec, plan, and implementation cycle. APK generation, custom DNS, and code signing are deferred to phase 2.
 
 | | Sub-project | Content | Gates | State |
 | --- | --- | --- | --- | --- |
 | A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | **done**, reviewed, 38 tests |
-| B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **next** — specced and planned |
-| C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (exe half) | not specced |
+| B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **done**, reviewed, 12 tests, Windows-verified |
+| C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (exe half) | **next**, not specced |
 | D | File bridge and adapters | port both WebView2 bridges, Photopea and `vscode.dev`, single-instance IPC | 6, 7, 8, save half of 4 and 5 | not specced |
 | E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
 | F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
-**Start at Task 5 of [`docs/superpowers/plans/2026-09-16-webwrap-spec-and-minimal-runtime.md`](docs/superpowers/plans/2026-09-16-webwrap-spec-and-minimal-runtime.md).** Read that plan's Status section first — it lists how the shipped crate differs from the plan's own Tasks 1-4 code blocks after review fixes. Read the spec too: [`docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md`](docs/superpowers/specs/2026-09-16-webwrap-spec-and-minimal-runtime-design.md).
+### Sub-project B, done 2026-11-20
 
-Sub-project A shipped `crates/webwrap-spec`: the `AppSpec` schema and validation, URL canonicalization, stable app identity, and navigation policy. Pure Rust, `forbid(unsafe_code)`, no Tauri or Windows dependency, so its whole suite runs anywhere. **`crates/webwrap-spec/tests/vectors.rs` is a permanent contract** — the identity of a URL decides whether regeneration updates an app or creates a second one. A failing vector means the implementation regressed, never that the vector needs updating.
+Plan: [`docs/superpowers/plans/2026-09-16-webwrap-spec-and-minimal-runtime.md`](docs/superpowers/plans/2026-09-16-webwrap-spec-and-minimal-runtime.md). Evidence: [`docs/evidence/2026-09-16-webwrap-spec-and-minimal-runtime.md`](docs/evidence/2026-09-16-webwrap-spec-and-minimal-runtime.md). Branch `feat/webwrap-runtime`.
 
-Spikes are deleted by whichever sub-project ports them, not all at once. `spikes/` is untouched by A and B; C removes `windows-pe-specialization`, D removes both WebView2 spikes. **B's integration test shells out to the PE spike's `webwrap-pe-specialize` binary to build its fixture**, so that spike must stay until C replaces it — at which point `specializer_path()` in `crates/webwrap-runtime/tests/inspect_self.rs` is the single line to repoint.
+`crates/webwrap-runtime` is the precompiled template. It does four things:
 
-## Environment notes for the implementing session
+- reads its `WEBWRAP_APP_SPEC` resource from the loaded image and revalidates it;
+- isolates WebView2 storage under `%LOCALAPPDATA%\WebWrap\<appId>` via `WebviewWindowBuilder::data_directory`;
+- enforces the navigation policy and sends http/https pop-ups to the system browser;
+- shows the generator-embedded `MAINICON` on its window.
 
-**Run sub-project B from Windows, not WSL.** It is `compile_error!` off Windows and needs the MSVC toolchain plus WebView2; none of it builds or tests under WSL, and this WSL host is `aarch64` Linux. The Windows side has both toolchains installed and the same plugin set.
+Every startup failure in run mode reaches a message box. The evidence doc lists four deviations from the plan, each verified against library source. It also lists four review findings handed to D: pop-ups without a user gesture, the wry navigation hook failing open on unparseable URLs, iframes and `LaunchingExternalUriScheme` not being covered, and a silent exit on a dropped file.
 
-- **`rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc` once**, then pass `--target` on every command. `rust-toolchain.toml` deliberately carries no `targets` key: that key only controls what rustup installs, it does not change the default build target, and it would force the WSL toolchain to download two Windows standard libraries it never uses. On this ARM64 host a naive `cargo build` silently yields an aarch64 binary while every spike's evidence was gathered on x64 MSVC. Generated executables target both architectures.
-- **`D:` is 92% full — about 24 GB free, and `target/` is 22 GB of it.** A WSL build into `/mnt/d` failed with `ENOMEM`; sub-project A was built with `CARGO_TARGET_DIR=$HOME/.cache/webwrap-target` instead. Thirteen of the fourteen `target/*` directories (`photopea-x64`, `task3-review`, `merge-x64`, and similar) are stale output from earlier review checkpoints and are reclaimable. Nobody has deleted them; that is the user's call.
-- **Explicit `--target` separates *compiled* artifacts into `target/<triple>/`, but not build scripts and proc macros**, which still compile for the host into plain `target/debug`. `tauri-build` is a build dependency, so Task 5 hits this. Cargo's metadata hashing should keep filenames distinct, but that is unverified — Task 5 confirms it rather than assuming it.
+## Immediate next step: sub-project C, packaging core
+
+C has no spec yet. Brainstorm and spec it first, then plan. It ports `spikes/windows-pe-specialization/src/pe.rs` into a generator crate, embeds the runtime template, specializes, and publishes atomically. When it deletes the spike, the same change must repoint three things:
+
+- `specializer_path()` in `crates/webwrap-runtime/tests/inspect_self.rs`;
+- the `cargo build -p windows-pe-specialization-spike` step in `.github/workflows/windows.yml`;
+- the "Build the acceptance apps" step in the same workflow, which calls `webwrap-pe-specialize.exe`.
+
+Carry forward from the plan's notes: the spike's `validate_text` bounds `displayName` in bytes, as `webwrap-spec` now does too. The spike's `validate_spec` is weaker than `AppSpec` validation, and C's generator should call `AppSpec::from_slice` instead.
+
+## How work runs now (since 2026-11-19)
+
+The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never compiles.
+
+- **Linux session (this container, x86_64):** writes all code and cross-compiles both Windows targets:
+  - `cargo xwin build|clippy|test --target x86_64-pc-windows-msvc|aarch64-pc-windows-msvc`, with `XWIN_ACCEPT_LICENSE=1`;
+  - fast local test runs under Wine 11 (WineHQ). Wine 8 cannot load current Rust binaries: there is no `ProcessPrng` in `bcryptprimitives.dll`;
+  - x64 only, and Wine has no WebView2, so nothing involving the window runs there.
+- **GitHub Actions (`.github/workflows/windows.yml`):** the authority for Windows behaviour.
+  - Runs fmt, both suites, and clippy `-D warnings` natively on `windows-latest` (x64) and `windows-11-arm` (ARM64).
+  - Builds release acceptance apps from `docs/windows-runs/fixtures/` and uploads them as `acceptance-<triple>`.
+  - Smoke-launches them on real WebView2.
+- **The user's Windows PC:** hands-on checks only.
+  - Paste the prompt in [`docs/windows-runs/README.md`](docs/windows-runs/README.md).
+  - Queue a run by committing `docs/windows-runs/NEXT.md`. It reads that file, downloads the CI artifacts, asks the user what is on screen, and pushes `docs/windows-runs/<date>-results.md`.
+  - With no `NEXT.md` it reports "nothing queued". Delete `NEXT.md` once its results are in.
+- **Cargo 1.100 layout:** test binaries live under `target/<triple>/<profile>/build/<pkg>/<hash>/out/`, with no `deps/`. Locate built bins with `env!("CARGO_BIN_EXE_<name>")`, not from the test's own path.
 
 ## Resume guardrails
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
 
-Sub-project A closes no release gate. B closes gates 11 and 14 only. Gates 1, 4, 5, 6, 7, and 8 belong to C, D, and E and must not be described as proven before then.
+Sub-project A closes no release gate. B closed gates 11 and 14 only. Gates 1, 4, 5, 6, 7, and 8 belong to C, D, and E and must not be described as proven before then.
 
 One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.

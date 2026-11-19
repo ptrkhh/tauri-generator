@@ -1,0 +1,46 @@
+use std::path::Path;
+
+use serde_json::{json, Value};
+use webwrap_spec::{nav_verdict, AppSpec, NavEvent, Verdict};
+
+fn verdict_name(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Allow => "allow",
+        Verdict::Block => "block",
+        Verdict::OpenExternally => "openExternally",
+    }
+}
+
+/// Print the runtime's own resolved configuration as one JSON object.
+///
+/// Each `--check-url` is evaluated as a top-level navigation. The new-window
+/// verdict is constant — every pop-up opens in the system browser — so it
+/// needs no per-URL probe and is covered by `webwrap-spec`'s unit tests.
+pub fn run(spec: &AppSpec, data_dir: &Path, check_urls: &[String]) -> ! {
+    let verdicts: Vec<Value> = check_urls
+        .iter()
+        .map(|url| {
+            json!({
+                "url": url,
+                "verdict": verdict_name(nav_verdict(url, NavEvent::TopLevel)),
+            })
+        })
+        .collect();
+    let report = json!({
+        "schemaVersion": spec.schema_version,
+        "appId": spec.app_id,
+        "displayName": spec.display_name,
+        "slug": spec.slug,
+        "launchUrl": spec.launch_url,
+        "trustedOrigins": spec.trusted_origins,
+        "adapter": spec.adapter,
+        "fileAssociations": spec.file_associations,
+        "dnsMode": spec.dns_mode,
+        "appVersion": spec.app_version,
+        "runtimeArch": std::env::consts::ARCH,
+        "webview2DataDir": data_dir.to_string_lossy(),
+        "navVerdicts": verdicts,
+    });
+    println!("{report}");
+    std::process::exit(0)
+}

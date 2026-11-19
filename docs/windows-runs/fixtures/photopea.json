@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "appId": "873756fbe97a1384",
+  "displayName": "Photopea",
+  "slug": "photopea",
+  "launchUrl": "https://www.photopea.com/",
+  "trustedOrigins": ["https://www.photopea.com"],
+  "adapter": "photopea",
+  "fileAssociations": [
+    {
+      "extension": ".psd",
+      "mimeType": "image/vnd.adobe.photoshop",
+      "description": "Photoshop document"
+    }
+  ],
+  "dnsMode": "system",
+  "appVersion": "1.0.0"
+}
