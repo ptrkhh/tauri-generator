@@ -40,3 +40,40 @@ jobs:
       - run: cargo build -p windows-pe-specialization-spike --target ${{ matrix.target }}
       - run: cargo test -p webwrap-runtime --target ${{ matrix.target }}
       - run: cargo clippy -p webwrap-spec -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Build the acceptance apps
+        shell: pwsh
+        env:
+          T: ${{ matrix.target }}
+        run: |
+          cargo build --release -p webwrap-runtime -p windows-pe-specialization-spike --target $env:T
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $bin = "target/$env:T/release"
+          $fx = "docs/windows-runs/fixtures"
+          New-Item -ItemType Directory acceptance | Out-Null
+          foreach ($app in @(@('Photopea', 'photopea', 'photopea-red'), @('Twitter', 'twitter', 'twitter-blue'))) {
+            & "$bin/webwrap-pe-specialize.exe" specialize --input "$bin/webwrap-runtime.exe" `
+              --output "acceptance/$($app[0]).exe" --spec "$fx/$($app[1]).json" --icon "$fx/$($app[2]).png" `
+              --display-name $app[0] --version 1.0.0
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          Copy-Item "$bin/webwrap-runtime.exe" acceptance/unspecialized-template.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-${{ matrix.target }}
+          path: acceptance/
+      - name: Smoke-launch both apps and check their WebView2 folders
+        shell: pwsh
+        run: |
+          $apps = @{ Photopea = '873756fbe97a1384'; Twitter = '2fa5e3f40150278f' }
+          $procs = foreach ($name in $apps.Keys) { Start-Process (Resolve-Path "acceptance/$name.exe") -PassThru }
+          Start-Sleep -Seconds 20
+          foreach ($p in $procs) { if ($p.HasExited) { throw "$($p.ProcessName) exited early with $($p.ExitCode)" } }
+          foreach ($id in $apps.Values) {
+            $dir = Join-Path $env:LOCALAPPDATA "WebWrap\$id\EBWebView"
+            if (-not (Test-Path $dir)) { throw "missing $dir" }
+            "ok: $dir"
+          }
+          # Tauri's default folder for the shared template identifier; using it would mean shared storage.
+          $shared = Join-Path $env:LOCALAPPDATA 'dev.webwrap.runtime\EBWebView'
+          if (Test-Path $shared) { throw "$shared exists, so the apps fell back to shared storage" }
+          $procs | Stop-Process -Force
