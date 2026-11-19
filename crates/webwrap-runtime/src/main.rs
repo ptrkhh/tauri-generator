@@ -9,7 +9,17 @@ mod inspect;
 
 use std::path::PathBuf;
 
-use webwrap_spec::AppSpec;
+use tauri::webview::NewWindowResponse;
+use tauri::{WebviewUrl, WebviewWindowBuilder};
+use webwrap_spec::{nav_verdict, AppSpec, NavEvent, Verdict};
+use windows::core::{w, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR,
+    SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, WM_SETICON,
+};
 
 enum Mode {
     Run,
@@ -62,6 +72,91 @@ fn data_dir(spec: &AppSpec) -> Result<PathBuf, String> {
     Ok(PathBuf::from(local).join("WebWrap").join(&spec.app_id))
 }
 
+/// Hand a URL to the system browser. Only reached for verdict
+/// `OpenExternally`, which `nav_verdict` returns for http and https alone.
+fn open_externally(url: &str) {
+    let url = HSTRING::from(url);
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &url,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Show this executable's own icon on the window and taskbar. Tauri applies
+/// the placeholder compiled into the template; the generator replaces the PE
+/// icon group, which editpe names `MAINICON`, so only that resource is per app.
+/// If it is missing the placeholder stays, which the GUI acceptance check sees.
+fn use_main_icon(hwnd: HWND) {
+    unsafe {
+        let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
+            return;
+        };
+        for (kind, metric) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)] {
+            let size = GetSystemMetrics(metric);
+            // Never destroyed: the window shows it until the process exits.
+            if let Ok(icon) = LoadImageW(
+                Some(module.into()),
+                w!("MAINICON"),
+                IMAGE_ICON,
+                size,
+                size,
+                LR_DEFAULTCOLOR,
+            ) {
+                SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(kind as usize)),
+                    Some(LPARAM(icon.0 as isize)),
+                );
+            }
+        }
+    }
+}
+
+fn run(spec: AppSpec, data_dir: PathBuf) -> ! {
+    // Validated as an https URL by AppSpec::validate, so parsing cannot fail.
+    let url: tauri::Url = spec
+        .launch_url
+        .parse()
+        .expect("launchUrl was validated as an https URL");
+    let title = spec.display_name;
+
+    let result = tauri::Builder::default()
+        .setup(move |app| {
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+                .title(title)
+                // Every generated app shares this compiled runtime and its
+                // tauri.conf.json identifier, so without this they would all
+                // share Tauri's default WebView2 folder.
+                .data_directory(data_dir)
+                .on_navigation(|url| nav_verdict(url.as_str(), NavEvent::TopLevel).is_allow())
+                .on_new_window(|url, _features| {
+                    if nav_verdict(url.as_str(), NavEvent::NewWindow) == Verdict::OpenExternally {
+                        open_externally(url.as_str());
+                    }
+                    NewWindowResponse::Deny
+                })
+                .build()?;
+            use_main_icon(window.hwnd()?);
+            Ok(())
+        })
+        .run(tauri::generate_context!());
+    if let Err(error) = result {
+        // A release build has no console, so a panic message would vanish.
+        fatal::abort(
+            &format!("the app window could not be started: {error}"),
+            true,
+        );
+    }
+    std::process::exit(0)
+}
+
 fn main() {
     let mode = match parse_args(std::env::args().skip(1)) {
         Ok(mode) => mode,
@@ -87,10 +182,7 @@ fn main() {
 
     match mode {
         Mode::InspectSelf { check_urls } => inspect::run(&spec, &data_dir, &check_urls),
-        Mode::Run => {
-            // Task 8 opens the window here.
-            std::process::exit(0)
-        }
+        Mode::Run => run(spec, data_dir),
     }
 }
 

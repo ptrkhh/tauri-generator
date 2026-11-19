@@ -1,13 +1,31 @@
 use std::path::Path;
 
-use serde_json::json;
-use webwrap_spec::AppSpec;
+use serde_json::{json, Value};
+use webwrap_spec::{nav_verdict, AppSpec, NavEvent, Verdict};
+
+fn verdict_name(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Allow => "allow",
+        Verdict::Block => "block",
+        Verdict::OpenExternally => "openExternally",
+    }
+}
 
 /// Print the runtime's own resolved configuration as one JSON object.
 ///
-/// This is what makes the runtime's behaviour assertable by automated tests
-/// instead of eyeballed. `navVerdicts` is filled in by Task 8.
-pub fn run(spec: &AppSpec, data_dir: &Path, _check_urls: &[String]) -> ! {
+/// Each `--check-url` is evaluated as a top-level navigation. The new-window
+/// verdict is constant — every pop-up opens in the system browser — so it
+/// needs no per-URL probe and is covered by `webwrap-spec`'s unit tests.
+pub fn run(spec: &AppSpec, data_dir: &Path, check_urls: &[String]) -> ! {
+    let verdicts: Vec<Value> = check_urls
+        .iter()
+        .map(|url| {
+            json!({
+                "url": url,
+                "verdict": verdict_name(nav_verdict(url, NavEvent::TopLevel)),
+            })
+        })
+        .collect();
     let report = json!({
         "schemaVersion": spec.schema_version,
         "appId": spec.app_id,
@@ -21,7 +39,7 @@ pub fn run(spec: &AppSpec, data_dir: &Path, _check_urls: &[String]) -> ! {
         "appVersion": spec.app_version,
         "runtimeArch": std::env::consts::ARCH,
         "webview2DataDir": data_dir.to_string_lossy(),
-        "navVerdicts": [],
+        "navVerdicts": verdicts,
     });
     println!("{report}");
     std::process::exit(0)

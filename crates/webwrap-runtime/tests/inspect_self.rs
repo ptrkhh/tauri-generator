@@ -303,3 +303,43 @@ fn the_data_directory_sits_under_localappdata() {
     let dir = report["webview2DataDir"].as_str().unwrap();
     assert!(dir.starts_with(&local), "{dir} is not under {local}");
 }
+
+#[test]
+fn gate_14_navigation_policy_is_enforced_by_the_real_binary() {
+    let exe = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
+    let report = inspect_self(
+        &exe,
+        &[
+            "https://www.photopea.com/",
+            "https://accounts.google.com/o/oauth2/auth",
+            "http://www.photopea.com/",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "not a url",
+        ],
+    );
+
+    let verdicts = report["navVerdicts"].as_array().unwrap();
+    assert_eq!(verdicts.len(), 6);
+
+    let verdict_for = |url: &str| -> String {
+        verdicts
+            .iter()
+            .find(|entry| entry["url"] == serde_json::json!(url))
+            .unwrap_or_else(|| panic!("no verdict for {url}"))["verdict"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    assert_eq!(verdict_for("https://www.photopea.com/"), "allow");
+    // An untrusted https origin is still allowed to navigate, or login breaks.
+    assert_eq!(
+        verdict_for("https://accounts.google.com/o/oauth2/auth"),
+        "allow"
+    );
+    assert_eq!(verdict_for("http://www.photopea.com/"), "block");
+    assert_eq!(verdict_for("file:///C:/Windows/win.ini"), "block");
+    assert_eq!(verdict_for("javascript:alert(1)"), "block");
+    assert_eq!(verdict_for("not a url"), "block");
+}
