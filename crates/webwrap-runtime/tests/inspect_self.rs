@@ -34,6 +34,20 @@ const PHOTOPEA_SPEC: &str = r#"{
   "appVersion": "1.0.0"
 }"#;
 
+/// The identity of `https://twitter.com/` is `2fa5e3f40150278f`.
+const TWITTER_SPEC: &str = r#"{
+  "schemaVersion": 1,
+  "appId": "2fa5e3f40150278f",
+  "displayName": "Twitter",
+  "slug": "twitter",
+  "launchUrl": "https://twitter.com/",
+  "trustedOrigins": ["https://twitter.com"],
+  "adapter": "none",
+  "fileAssociations": [],
+  "dnsMode": "system",
+  "appVersion": "1.0.0"
+}"#;
+
 fn unique(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nonce = SystemTime::now()
@@ -256,4 +270,36 @@ fn a_specification_that_fails_validation_is_rejected_at_startup() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("appId"), "unhelpful message: {stderr}");
+}
+
+#[test]
+fn gate_11_two_apps_use_separate_webview2_data_directories() {
+    let photopea = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
+    let twitter = specialize_fixture(TWITTER_SPEC, "Twitter", "1.0.0");
+
+    let a = inspect_self(&photopea, &[]);
+    let b = inspect_self(&twitter, &[]);
+
+    let dir_a = a["webview2DataDir"].as_str().unwrap();
+    let dir_b = b["webview2DataDir"].as_str().unwrap();
+
+    assert_ne!(dir_a, dir_b, "generated apps must not share storage");
+    assert!(dir_a.ends_with("873756fbe97a1384"), "{dir_a}");
+    assert!(dir_b.ends_with("2fa5e3f40150278f"), "{dir_b}");
+    assert!(dir_a.contains("WebWrap"), "{dir_a}");
+
+    // The directory is derived from the identity, and the identity is pinned
+    // to the launch URL by the specification's own invariant, so storage
+    // cannot drift away from the site it belongs to.
+    assert_eq!(a["appId"], serde_json::json!("873756fbe97a1384"));
+    assert_eq!(b["appId"], serde_json::json!("2fa5e3f40150278f"));
+}
+
+#[test]
+fn the_data_directory_sits_under_localappdata() {
+    let exe = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
+    let report = inspect_self(&exe, &[]);
+    let local = std::env::var("LOCALAPPDATA").unwrap();
+    let dir = report["webview2DataDir"].as_str().unwrap();
+    assert!(dir.starts_with(&local), "{dir} is not under {local}");
 }
