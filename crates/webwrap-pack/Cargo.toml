@@ -1,0 +1,13 @@
+[package]
+name = "webwrap-pack"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+
+[dependencies]
+editpe = "=0.2.4"
+# editpe enables only `ico`; PNG decoding must be switched on here explicitly.
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+serde_json = "=1.0.151"
+url = "=2.5.8"
+webwrap-spec = { path = "../webwrap-spec" }
