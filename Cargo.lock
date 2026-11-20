@@ -4063,6 +4063,8 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "webview2-com",
+ "webwrap-bridge",
  "webwrap-pack",
  "webwrap-spec",
  "windows",

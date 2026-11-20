@@ -42,7 +42,7 @@ This is the contract D2-D4 build on. Messages go through `chrome.webview`. Every
 Rules enforced by the bridge state machine:
 
 - A token is created only for a path from the command line or the pipe (later, a native picker).
-- A document must say `webwrap-ready` before anything is delivered to it. Every top-level `NavigationStarting` resets this, so nothing is posted into a document that is not listening.
+- A document must say `webwrap-ready` before anything is delivered to it. Every new top-level document (`ContentLoading`, before its scripts run) resets this, so nothing is posted into a document that is not listening. Keying this on `NavigationStarting` would be wrong: a navigation that becomes a download, or that another handler cancels, leaves the trusted document in place.
 - A save is refused for a token that is unknown, revoked, or not yet delivered; for a size of 0 or over 4 GiB; and while another save of the same token is in flight.
 - A save buffer that was never committed is dropped on the next top-level navigation.
 - Reading and writing files happens on a worker thread. The UI thread only creates, posts, and closes buffers.
@@ -106,7 +106,8 @@ Tests (Wine and CI): a second `become_primary` for the same app is refused; a di
 
 | Handler | Rule |
 | --- | --- |
-| `NavigationStarting` | `SetCancel(true)` unless `nav_verdict(uri, TopLevel)` is `Allow`. An unparseable URI is therefore blocked. Then the session is told, which resets readiness and revokes on an untrusted origin. |
+| `NavigationStarting` | `SetCancel(true)` unless `nav_verdict(uri, TopLevel)` is `Allow`. An unparseable URI is therefore blocked |
+| `ContentLoading` | Tells the session a new document is loading at the live `Source`. This resets readiness, and an untrusted origin revokes delivered tokens |
 | `FrameNavigationStarting` | Cancel unless the scheme is `http`, `https`, `blob`, `data`, or the URL is `about:blank`/`about:srcdoc` |
 | `LaunchingExternalUriScheme` | Always cancel |
 | `NewWindowRequested` | wry already sets `Handled(true)` (deny) when Tauri has no pop-up hook, so `.on_new_window` is removed. The runtime opens the URL with `ShellExecuteW` only when `IsUserInitiated` **and** the verdict is `OpenExternally` |

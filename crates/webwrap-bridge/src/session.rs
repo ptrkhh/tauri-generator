@@ -55,7 +55,7 @@ pub enum AfterRead {
     Retry(Vec<Delivery>),
 }
 
-/// The effect of a top-level navigation.
+/// The effect of a new top-level document.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Navigated {
     /// Delivered tokens that no longer work.
@@ -127,12 +127,13 @@ impl Session {
         }
     }
 
-    fn trusted(&self, url: &str) -> bool {
+    /// Whether a page at `url` may receive files or be told about them.
+    pub fn trusts(&self, url: &str) -> bool {
         is_trusted_origin(&self.trusted_origins, url)
     }
 
     fn check_sources(&self, source: &str, live: &str) -> Result<(), Refusal> {
-        if self.trusted(source) && self.trusted(live) {
+        if self.trusts(source) && self.trusts(live) {
             Ok(())
         } else {
             Err(Refusal::Untrusted)
@@ -152,7 +153,7 @@ impl Session {
                 state: State::Queued,
             },
         );
-        if self.ready && self.trusted(live) {
+        if self.ready && self.trusts(live) {
             self.start_queued()
         } else {
             Vec::new()
@@ -185,7 +186,7 @@ impl Session {
     /// A delivery's bytes are ready. Decide immediately before posting.
     pub fn delivery_read(&mut self, token: u64, live: &str) -> AfterRead {
         let current = self.generation;
-        let trusted = self.trusted(live);
+        let trusted = self.trusts(live);
         let Some(entry) = self.entries.get_mut(&token) else {
             return AfterRead::Retry(Vec::new());
         };
@@ -211,13 +212,18 @@ impl Session {
         self.entries.remove(&token);
     }
 
-    /// A top-level navigation started. The new document must announce itself
-    /// again, uncommitted saves are dropped, and leaving the trusted origins
-    /// revokes every delivered token. Queued files were never exposed and stay.
-    pub fn navigation_starting(&mut self, url: &str) -> Navigated {
+    /// A new top-level document is loading (WebView2 `ContentLoading`), before
+    /// any of its scripts run. It must announce itself again, uncommitted saves
+    /// are dropped, and a document outside the trusted origins revokes every
+    /// delivered token. Queued files were never exposed and stay queued.
+    ///
+    /// This is keyed on the document actually changing, not on a navigation
+    /// starting: a navigation that becomes a download, or is cancelled, leaves
+    /// the trusted document in place and must not revoke its files.
+    pub fn document_changed(&mut self, url: &str) -> Navigated {
         self.generation += 1;
         self.ready = false;
-        let trusted = self.trusted(url);
+        let trusted = self.trusts(url);
         let mut navigated = Navigated::default();
         self.entries.retain(|&token, entry| {
             let State::Delivered(save) = &mut entry.state else {
@@ -286,11 +292,12 @@ impl Session {
         }
     }
 
-    /// A write finished, either way. A revoked token stays revoked.
-    pub fn save_finished(&mut self, token: u64) {
+    /// A save finished or was abandoned, either way. A revoked token stays
+    /// revoked.
+    pub fn save_ended(&mut self, token: u64) {
         if let Some(entry) = self.entries.get_mut(&token) {
-            if entry.state == State::Delivered(Save::Writing) {
-                entry.state = State::Delivered(Save::Idle);
+            if let State::Delivered(save) = &mut entry.state {
+                *save = Save::Idle;
             }
         }
     }
@@ -387,7 +394,7 @@ mod tests {
         let mut s = session();
         s.open(path("a.psd"), HOME);
         let token = s.ready(HOME, HOME).unwrap()[0].token;
-        s.navigation_starting("https://app.test/reload");
+        s.document_changed("https://app.test/reload");
         assert_eq!(s.delivery_read(token, HOME), AfterRead::Retry(vec![]));
         // The new document announces itself and gets the file.
         assert_eq!(s.ready(HOME, HOME).unwrap()[0].token, token);
@@ -406,7 +413,7 @@ mod tests {
     fn leaving_the_trusted_origin_revokes_delivered_tokens_but_keeps_queued_files() {
         let mut s = session();
         let token = delivered(&mut s, "a.psd");
-        let navigated = s.navigation_starting(AWAY);
+        let navigated = s.document_changed(AWAY);
         assert_eq!(navigated.revoked, 1);
         // Gate 8: neither the untrusted page nor a later trusted one can use it.
         assert_eq!(
@@ -415,7 +422,7 @@ mod tests {
         );
         assert_eq!(s.ready(AWAY, AWAY), Err(Refusal::Untrusted));
         assert!(s.open(path("b.psd"), AWAY).is_empty());
-        s.navigation_starting(HOME);
+        s.document_changed(HOME);
         assert_eq!(
             s.begin_save(HOME, HOME, &token.to_string(), 4),
             Err(Refusal::UnknownToken)
@@ -432,7 +439,7 @@ mod tests {
         let token = delivered(&mut s, "a.psd");
         let t = token.to_string();
         s.begin_save(HOME, HOME, &t, 4).unwrap();
-        let navigated = s.navigation_starting("https://app.test/other");
+        let navigated = s.document_changed("https://app.test/other");
         assert_eq!(
             navigated,
             Navigated {
@@ -480,7 +487,10 @@ mod tests {
         assert_eq!(s.commit_save(HOME, HOME, &t), Ok((token, path("a.psd"))));
         assert_eq!(s.begin_save(HOME, HOME, &t, 4), Err(Refusal::InFlight));
         assert_eq!(s.commit_save(HOME, HOME, &t), Err(Refusal::NotAwaiting));
-        s.save_finished(token);
+        s.save_ended(token);
+        assert_eq!(s.begin_save(HOME, HOME, &t, 4), Ok(token));
+        // A save whose buffer could not be created is abandoned the same way.
+        s.save_ended(token);
         assert_eq!(s.begin_save(HOME, HOME, &t, 4), Ok(token));
     }
 
@@ -492,9 +502,9 @@ mod tests {
         s.begin_save(HOME, HOME, &t, 4).unwrap();
         s.commit_save(HOME, HOME, &t).unwrap();
         // The buffer being written is not reported for closing.
-        assert_eq!(s.navigation_starting(AWAY).dropped_saves, Vec::<u64>::new());
-        s.save_finished(token);
-        s.navigation_starting(HOME);
+        assert_eq!(s.document_changed(AWAY).dropped_saves, Vec::<u64>::new());
+        s.save_ended(token);
+        s.document_changed(HOME);
         assert_eq!(s.begin_save(HOME, HOME, &t, 4), Err(Refusal::UnknownToken));
     }
 
@@ -505,7 +515,7 @@ mod tests {
         let token = s.ready(HOME, HOME).unwrap()[0].token;
         s.delivery_failed(token);
         assert_eq!(s.name(token), None);
-        s.navigation_starting(HOME);
+        s.document_changed(HOME);
         assert!(s.ready(HOME, HOME).unwrap().is_empty());
     }
 }
