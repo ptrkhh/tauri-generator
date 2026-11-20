@@ -72,7 +72,7 @@ From the canonical URL's host:
 3. Join the remaining labels with `-`.
 4. Replace any character outside `[a-z0-9-]` with `-`, collapse repeats, and trim hyphens at the ends.
 5. Truncate to 64 characters.
-6. If the result is empty or a reserved device name, append `-app`.
+6. If the result is empty, use `app`. If it is a reserved device name, append `-app`. (Appending `-app` to an empty result would start the name with a hyphen.)
 
 Examples:
 
