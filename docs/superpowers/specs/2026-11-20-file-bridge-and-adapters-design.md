@@ -1,6 +1,6 @@
 # File Bridge and Adapters Design (sub-project D)
 
-Date: 2026-11-20. Status: approved by the user 2026-11-20. D1 is implemented (plan `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md`, evidence `docs/evidence/2026-11-20-file-bridge-plumbing.md`). D2 is implemented (plan `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md`, evidence `docs/evidence/2026-11-20-vscode-dev-adapter.md`); its plan records where it departs from the D2 section below. D3 and D4 are next.
+Date: 2026-11-20. Status: approved by the user 2026-11-20. D1 is implemented (plan `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md`, evidence `docs/evidence/2026-11-20-file-bridge-plumbing.md`). D2 is implemented (plan `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md`, evidence `docs/evidence/2026-11-20-vscode-dev-adapter.md`), and D3 is implemented (plan `docs/superpowers/plans/2026-11-20-photopea-adapter.md`, evidence `docs/evidence/2026-11-20-photopea-adapter.md`). Their plans record where they depart from the sections below. D4 is next.
 
 ## Summary
 

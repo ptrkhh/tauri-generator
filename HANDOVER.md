@@ -57,7 +57,7 @@ The follow-on work was brainstormed on 2026-09-16. The Windows track is split in
 | A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | **done**, reviewed, 38 tests |
 | B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **done**, reviewed, 12 tests, Windows-verified |
 | C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (Windows half), 3 | **done**, reviewed, Windows-verified in CI |
-| D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **in progress**: D1 done (6, 7, 8); D2 done (save half of 5), reviewed, verified in CI against live `vscode.dev`; D3 next |
+| D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **in progress**: D1 done (6, 7, 8); D2 done (save half of 5) and D3 done (save half of 4), reviewed, verified in CI against the live sites; D4 next |
 | E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
 | F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
@@ -126,16 +126,46 @@ Plan: [`docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md`](docs/superpowe
   - `e2e/vscode-live.mjs` drives live vscode.dev in its own CI step, which also runs weekly (`schedule`).
 - **Known limits:** evidence section 7.
 
-## Immediate next step: D3, the Photopea adapter
+### Sub-project D3, done 2026-11-20
 
-Write D3's plan from the spec's D3 section. It ports `spikes/photopea-windows-writeback`, then deletes the spike:
+Plan: [`docs/superpowers/plans/2026-11-20-photopea-adapter.md`](docs/superpowers/plans/2026-11-20-photopea-adapter.md). Evidence: [`docs/evidence/2026-11-20-photopea-adapter.md`](docs/evidence/2026-11-20-photopea-adapter.md). Branch `feat/photopea-adapter`. The spike `spikes/photopea-windows-writeback` is deleted, and so is the workspace's `spikes/*` entry.
 
-- a local shell page embeds Photopea in an iframe and speaks its Live Messaging API;
-- the file reaches the shell through D1's shared buffer;
-- saving goes through Photopea's custom-I/O `save` hook and D1's save buffer, then `ReplaceFileW`;
-- Ctrl+O goes through the native Windows open dialog.
+- **The shell.** For `adapter: photopea`, the window shows `https://tauri.localhost/photopea.html`, a bundled asset served with `use_https_scheme(true)`. Its logic is the initialization script `crates/webwrap-runtime/src/photopea.js`.
+  - The session trusts only that origin.
+  - The shell talks to Photopea's frame, `trustedOrigins[0]`, with Photopea's Live Messaging API.
+- **Files go through D1's shared buffers,** so `%TEMP%`, shares, and long paths all work here.
+- **Each document is tagged** `source = webwrap:<token>`, but only if it is the newest one and still Photopea's fresh `file`.
+- **Save:**
+  - `customIO.save` reports the pressed document;
+  - the shell activates it, because Photopea exports only the active document;
+  - it exports in the file's own format;
+  - the runtime checks the signature against the extension (`save_signature_ok`) before `ReplaceFileW`.
+- **Ctrl+O** is `webwrap-pick-file`, which shows `IFileOpenDialog` after the WebView2 event returns.
+- **Facts worth knowing:**
+  - Photopea gives no reply at all to a buffer it cannot read.
+  - DevTools Ctrl+S never reaches Photopea's Save hook, while File > Save does.
+- **Tests.** `e2e/photopea.mjs` uses a stand-in Photopea (`bridge-d`). `e2e/photopea-live.mjs` uses live Photopea with a 151 MB PSD.
+  - The stand-in test drives the real Windows Open dialog through its classic controls: the file-name box is id 1148 and Open is id 1.
+  - UI Automation does not expose those two controls on the runners.
+  - The same `pickInDialog` could also automate D2's Ctrl+O check, which is still a PC check.
+- **Known limits:** evidence section 6.
 
-D3's evidence needs a real PSD of at least 150 MB opening and saving, against live Photopea, in the same CI pattern as D2's live step. D4 (generic sites) follows.
+## Immediate next step: D4, generic sites
+
+Write D4's plan from the spec's D4 section. For `adapter: none`, a file request goes through tiers in order, and the user is told which handled it:
+
+1. **The PWA `launchQueue`:** an initialization script installs it, giving read-write handles. Mind D2's measured handle limits: AppData, shares, and long paths are refused.
+2. **The native picker passthrough:** D4 only verifies it.
+3. **The upload box or a drop:** a `File` built from a shared buffer, open-only.
+4. **An unsupported message.**
+
+Also in D4:
+
+- `fileTier` in `--inspect-self`;
+- the tier labels;
+- the one-time notice for tiers 3 and 4.
+
+Follow D2 and D3's pattern: a local test site per tier in CI, live where a real site matters, and a review before merging.
 
 Still open from earlier sub-projects:
 
@@ -165,6 +195,6 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
 
-Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. D2 closed the save half of gate 5. Gate 4's save half belongs to D3, and the "Open with" and double-click halves of gates 4 and 5 to E; none of these may be described as proven before then. Gate 1 also needs F and the phase-2 APK.
+Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. D2 closed the save half of gate 5, and D3 the save half of gate 4. The "Open with" and double-click halves of gates 4 and 5 belong to E and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
 
 One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.

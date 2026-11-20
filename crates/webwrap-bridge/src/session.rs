@@ -38,6 +38,9 @@ pub enum PageMessage {
     /// delivered files. The app tells the user.
     #[serde(rename = "webwrap-open-failed")]
     OpenFailed { tokens: Vec<String> },
+    /// The `photopea` shell asks for the native open dialog (Ctrl+O).
+    #[serde(rename = "webwrap-pick-file")]
+    PickFile,
 }
 
 /// Parse the JSON text a page posted as a string with
@@ -458,6 +461,10 @@ mod tests {
                 token: "3".into(),
                 save: 9
             })
+        );
+        assert_eq!(
+            parse_page_message(r#"{"type":"webwrap-pick-file"}"#),
+            Some(PageMessage::PickFile)
         );
         assert_eq!(
             parse_page_message(r#"{"type":"webwrap-open-failed","tokens":["3","4"]}"#),

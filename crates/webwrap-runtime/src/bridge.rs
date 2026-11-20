@@ -26,13 +26,13 @@ use webview2_com::{
     NavigationStartingEventHandler, WebMessageReceivedEventHandler,
 };
 use webwrap_bridge::{
-    check_file, handle_refusal, parse_page_message, protected_folders, AfterRead, Delivery,
-    PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
+    check_file, handle_refusal, parse_page_message, protected_folders, resolve, save_signature_ok,
+    AfterRead, Delivery, PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
 };
-use webwrap_spec::Adapter;
+use webwrap_spec::{Adapter, Assoc};
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
 
-use crate::vscode;
+use crate::{photopea, vscode};
 use crate::{report, save};
 
 /// The UI thread's WebView2 objects and the shared buffers in use, by token.
@@ -101,6 +101,10 @@ pub struct Bridge {
     close_when_written: Arc<AtomicBool>,
     recheck_scheduled: Arc<AtomicBool>,
     adapter: Adapter,
+    /// The app's file types, for the open dialog.
+    associations: Arc<Vec<Assoc>>,
+    /// The open dialog is showing; a second request is refused.
+    picking: Arc<AtomicBool>,
 }
 
 /// What the page is told when a write fails. The reason, which names local
@@ -115,6 +119,7 @@ impl Bridge {
         window: &WebviewWindow,
         trusted_origins: Vec<String>,
         adapter: Adapter,
+        associations: Vec<Assoc>,
         files: Vec<PathBuf>,
     ) -> tauri::Result<Self> {
         let bridge = Bridge {
@@ -124,6 +129,8 @@ impl Bridge {
             close_when_written: Arc::new(AtomicBool::new(false)),
             recheck_scheduled: Arc::new(AtomicBool::new(false)),
             adapter,
+            associations: Arc::new(associations),
+            picking: Arc::new(AtomicBool::new(false)),
         };
         let installer = bridge.clone();
         window.with_webview(move |platform| {
@@ -322,9 +329,16 @@ impl Bridge {
                 }
             }
             PageMessage::OpenFailed { tokens } => {
-                if self.adapter != Adapter::VscodeDev {
-                    return report::log("open-failed-refused this app has no vscode.dev adapter");
-                }
+                let (site, advice) = match self.adapter {
+                    Adapter::VscodeDev => (
+                        "vscode.dev",
+                        "They are waiting. Choose File > Open File... in vscode.dev to open them.",
+                    ),
+                    Adapter::Photopea => ("Photopea", "It may not support their format."),
+                    Adapter::None => {
+                        return report::log("open-failed-refused this app has no adapter");
+                    }
+                };
                 let named: Result<Vec<String>, Refusal> = {
                     let session = self.session();
                     tokens
@@ -340,13 +354,11 @@ impl Bridge {
                 match named {
                     Ok(names) if !names.is_empty() => {
                         report::log(format_args!(
-                            "open-failed {}: vscode.dev did not open it",
+                            "open-failed {}: {site} did not open it",
                             names.join(", ")
                         ));
                         report::error_box_async(format!(
-                            "vscode.dev did not open these files: its Open File command did not respond.\n\n\
-                             {}\n\n\
-                             They are waiting. Choose File > Open File... in vscode.dev to open them.",
+                            "{site} did not open these files:\n\n{}\n\n{advice}",
                             names.join("\n")
                         ));
                     }
@@ -355,6 +367,33 @@ impl Bridge {
                         report::log(format_args!("open-failed-refused {refusal}; {source}"))
                     }
                 }
+            }
+            PageMessage::PickFile => {
+                if self.adapter != Adapter::Photopea {
+                    return report::log("pick-file-refused this app has no Photopea adapter");
+                }
+                if !(self.session().trusts(source) && self.session().trusts(live)) {
+                    return report::log(format_args!(
+                        "pick-file-refused {}; {source}",
+                        Refusal::Untrusted
+                    ));
+                }
+                if self.picking.swap(true, Ordering::SeqCst) {
+                    return report::log("pick-file-refused the open dialog is already showing");
+                }
+                // Shown once this event has returned, not from inside it. On
+                // the main thread, run_on_main_thread would run it right here,
+                // so the request comes from another thread.
+                let bridge = self.clone();
+                std::thread::spawn(move || {
+                    let (window, picking) = (bridge.window.clone(), bridge.picking.clone());
+                    if window
+                        .run_on_main_thread(move || bridge.pick_files())
+                        .is_err()
+                    {
+                        picking.store(false, Ordering::SeqCst);
+                    }
+                });
             }
         }
     }
@@ -487,6 +526,49 @@ impl Bridge {
         Ok(())
     }
 
+    /// Ctrl+O in Photopea: the native open dialog. Chosen files open exactly
+    /// like files from a later launch.
+    fn pick_files(&self) {
+        report::log("pick-file shown");
+        let chosen = self
+            .window
+            .hwnd()
+            .map_err(|error| {
+                windows::core::Error::new(windows::core::HRESULT(-1), error.to_string())
+            })
+            .and_then(|hwnd| photopea::pick_files(hwnd, &self.associations));
+        self.picking.store(false, Ordering::SeqCst);
+        let chosen = match chosen {
+            Ok(chosen) => chosen,
+            Err(error) => {
+                report::log(format_args!("pick-file-failed {error}"));
+                return report::error_box_async(format!(
+                    "The open dialog could not be shown.\n\n{error}"
+                ));
+            }
+        };
+        report::log(format_args!("pick-file {} chosen", chosen.len()));
+        let (mut files, mut bad) = (Vec::new(), Vec::new());
+        if chosen.len() > MAX_FILES {
+            bad.push(format!(
+                "Only the first {MAX_FILES} of the chosen files were opened."
+            ));
+        }
+        for path in chosen.into_iter().take(MAX_FILES) {
+            match resolve(path.as_os_str()) {
+                Ok(path) => files.push(path),
+                Err(reason) => bad.push(format!("{}: {reason}", path.display())),
+            }
+        }
+        if !bad.is_empty() {
+            report::error_box_async(format!(
+                "These files could not be opened:\n\n{}",
+                bad.join("\n")
+            ));
+        }
+        self.open(files);
+    }
+
     fn delivery_failed(&self, delivery: &Delivery, error: String) {
         self.session().delivery_failed(delivery.token);
         report::log(format_args!("open-failed {}: {error}", delivery.name));
@@ -552,13 +634,21 @@ impl Bridge {
             Err(error) => return self.finish_save(id, token, Err(error)),
         };
         let bridge = self.clone();
+        let adapter = self.adapter;
         self.writing.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
             // SAFETY: the buffer is `size` bytes and stays mapped until the UI
             // thread closes it in `finish_save`, after this write. The page
             // can still change it meanwhile, which only alters its own save.
             let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, size as usize) };
-            let written = save::replace(&path, bytes)
+            // Photopea exports one format per save; it must be the one the
+            // file's extension names.
+            let checked = match adapter {
+                Adapter::Photopea => save_signature_ok(&path, bytes),
+                _ => Ok(()),
+            };
+            let written = checked
+                .and_then(|()| save::replace(&path, bytes).map_err(|error| error.to_string()))
                 .map_err(|error| format!("{} could not be saved.\n\n{error}", path.display()));
             let window = bridge.window.clone();
             let _ = window.run_on_main_thread(move || {
