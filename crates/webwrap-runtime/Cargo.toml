@@ -23,3 +23,6 @@ windows = { version = "=0.61.3", features = [
 [[bin]]
 name = "webwrap-runtime"
 path = "src/main.rs"
+
+[dev-dependencies]
+webwrap-pack = { path = "../webwrap-pack" }

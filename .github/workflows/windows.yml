@@ -31,41 +31,59 @@ jobs:
             Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
           }
       - run: rustup show active-toolchain
-      - run: rustup target add ${{ matrix.target }}
+      - run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       - run: cargo fmt --all -- --check
       - run: cargo test -p webwrap-spec
-      - run: cargo build -p windows-pe-specialization-spike --target ${{ matrix.target }}
+      # The generator embeds both architectures' runtime, so every runner
+      # builds both release templates; the packaging tests use them too.
+      - name: Build the runtime templates for both architectures
+        shell: pwsh
+        run: |
+          foreach ($t in 'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc') {
+            cargo build --release -p webwrap-runtime --target $t
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          "WEBWRAP_TEMPLATE_X64=$PWD\target\x86_64-pc-windows-msvc\release\webwrap-runtime.exe" >> $env:GITHUB_ENV
+          "WEBWRAP_TEMPLATE_ARM64=$PWD\target\aarch64-pc-windows-msvc\release\webwrap-runtime.exe" >> $env:GITHUB_ENV
+      - run: cargo test -p webwrap-pack -p webwrap-generate --target ${{ matrix.target }}
       - run: cargo test -p webwrap-runtime --target ${{ matrix.target }}
-      - run: cargo clippy -p webwrap-spec -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
-      - name: Build the acceptance apps
+      - name: Probe regenerating over a running app
+        run: cargo test -p webwrap-pack --target ${{ matrix.target }} --test running_app -- --ignored --nocapture
+      - run: cargo clippy -p webwrap-spec -p webwrap-pack -p webwrap-generate -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Build the generator and the acceptance apps
         shell: pwsh
         env:
           T: ${{ matrix.target }}
         run: |
-          cargo build --release -p webwrap-runtime -p windows-pe-specialization-spike --target $env:T
+          cargo build --release -p webwrap-generate --target $env:T
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          $bin = "target/$env:T/release"
+          $gen = "target/$env:T/release/webwrap-generate.exe"
           $fx = "docs/windows-runs/fixtures"
           New-Item -ItemType Directory acceptance | Out-Null
-          foreach ($app in @(@('Photopea', 'photopea', 'photopea-red'), @('Twitter', 'twitter', 'twitter-blue'))) {
-            & "$bin/webwrap-pe-specialize.exe" specialize --input "$bin/webwrap-runtime.exe" `
-              --output "acceptance/$($app[0]).exe" --spec "$fx/$($app[1]).json" --icon "$fx/$($app[2]).png" `
-              --display-name $app[0] --version 1.0.0
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          Copy-Item "$bin/webwrap-runtime.exe" acceptance/unspecialized-template.exe
+          & $gen generate --url www.photopea.com --name Photopea --icon "$fx/photopea-red.png" --out acceptance `
+            --adapter photopea --assoc .psd image/vnd.adobe.photoshop "Photoshop document"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $gen generate --url twitter.com --name Twitter --icon "$fx/twitter-blue.png" --out acceptance
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Copy-Item $env:WEBWRAP_TEMPLATE_X64 acceptance/unspecialized-template-x64.exe
+          Copy-Item $env:WEBWRAP_TEMPLATE_ARM64 acceptance/unspecialized-template-arm64.exe
+          Copy-Item $gen acceptance/
+          Get-ChildItem acceptance | Format-Table Name, Length
       - uses: actions/upload-artifact@v4
         with:
           name: acceptance-${{ matrix.target }}
           path: acceptance/
-      - name: Smoke-launch both apps and check their WebView2 folders
+      - name: Smoke-launch this runner's apps and check their WebView2 folders
         shell: pwsh
+        env:
+          T: ${{ matrix.target }}
         run: |
-          $apps = @{ Photopea = '873756fbe97a1384'; Twitter = '2fa5e3f40150278f' }
-          $procs = foreach ($name in $apps.Keys) { Start-Process (Resolve-Path "acceptance/$name.exe") -PassThru }
+          $native = if ($env:T -like 'aarch64*') { 'arm64' } else { 'x64' }
+          $apps = @{ photopea = '873756fbe97a1384'; twitter = '2fa5e3f40150278f' }
+          $procs = foreach ($slug in $apps.Keys) { Start-Process (Resolve-Path "acceptance/$slug-$native.exe") -PassThru }
           Start-Sleep -Seconds 20
           foreach ($p in $procs) { if ($p.HasExited) { throw "$($p.ProcessName) exited early with $($p.ExitCode)" } }
           foreach ($id in $apps.Values) {
