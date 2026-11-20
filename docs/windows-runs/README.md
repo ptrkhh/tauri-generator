@@ -5,7 +5,7 @@ The Windows PC is a slow ARM64 laptop, so it never compiles. Code is written and
 - **Queue a run:** commit `NEXT.md` here, on the branch under test, saying where to get the CI artifacts and what to check.
 - **Results:** they come back as `<YYYY-MM-DD>-results.md`.
 - **After a run:** delete `NEXT.md` once its results are in, so the prompt reports "nothing queued".
-- **`fixtures/`:** the specs and icons CI uses to build the acceptance apps.
+- **`fixtures/`:** the icons CI uses to build the acceptance apps.
 
 ## Prompt to paste into Claude Code on the Windows PC
 

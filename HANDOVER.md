@@ -1,6 +1,6 @@
 # WebWrap handover
 
-Updated 2026-11-20. The spikes and sub-projects A and B are finished. A fresh Codex/Claude session should start here:
+Updated 2026-11-20. The spikes and sub-projects A, B, and C are finished. A fresh Codex/Claude session should start here:
 
 - Work on `main` in the repository root. The `spike/photopea-windows-writeback` branch and its `.worktrees/photopea-windows-writeback` linked worktree were merged and removed; do not look for them.
 - Current code HEAD: check `git log -1 --format=%H` rather than trusting a hash recorded here, which goes stale as soon as the next commit lands.
@@ -8,7 +8,7 @@ Updated 2026-11-20. The spikes and sub-projects A and B are finished. A fresh Co
 
 ## Product decisions already made
 
-The eventual personal, non-commercial tool is a local `tauri_generator.exe`, not a hosted website or GitHub Actions service. It should accept a website such as `twitter.com` and produce self-contained `twitter.exe` and `twitter.apk` files (no JSON/ICO sidecars). Different canonical URLs coexist; regenerating the same URL updates that app rather than replacing another app. Icon discovery is automatic with an optional gallery override.
+The eventual personal, non-commercial tool is a local `tauri_generator.exe`, not a hosted website or GitHub Actions service. It should accept a website such as `twitter.com` and produce self-contained `twitter-x64.exe`, `twitter-arm64.exe`, and `twitter.apk` files (no JSON/ICO sidecars). Regenerating the same URL updates that app. Since 2026-11-20, a different URL given the same file name overwrites the old app. Files the generator did not make are never overwritten. The generator asks for the output folder every time. Icon discovery is automatic with an optional gallery override.
 
 Windows v1 must support file associations broadly, at minimum Photopea for `.psd` and vscode.dev (or a compatible alternative) for `.md`. Double-clicking a file should launch the matching generated app. Ctrl+S must write changes back to the original local file, and Ctrl+O should continue to work. Custom DNS is an optional generation setting: system DNS is the default; otherwise ask for a complete HTTPS DoH URL, never silently bypass it, and fail closed if it cannot be honored.
 
@@ -56,8 +56,8 @@ The follow-on work was brainstormed on 2026-09-16. The Windows track is split in
 | --- | --- | --- | --- | --- |
 | A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | **done**, reviewed, 38 tests |
 | B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **done**, reviewed, 12 tests, Windows-verified |
-| C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (exe half) | **next**, not specced |
-| D | File bridge and adapters | port both WebView2 bridges, Photopea and `vscode.dev`, single-instance IPC | 6, 7, 8, save half of 4 and 5 | not specced |
+| C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (Windows half), 3 | **done**, reviewed, Windows-verified in CI |
+| D | File bridge and adapters | port both WebView2 bridges, Photopea and `vscode.dev`, single-instance IPC | 6, 7, 8, save half of 4 and 5 | **next**, not specced |
 | E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
 | F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
@@ -74,15 +74,36 @@ Plan: [`docs/superpowers/plans/2026-09-16-webwrap-spec-and-minimal-runtime.md`](
 
 Every startup failure in run mode reaches a message box. The evidence doc lists four deviations from the plan, each verified against library source. It also lists four review findings handed to D: pop-ups without a user gesture, the wry navigation hook failing open on unparseable URLs, iframes and `LaunchingExternalUriScheme` not being covered, and a silent exit on a dropped file.
 
-## Immediate next step: sub-project C, packaging core
+### Sub-project C, done 2026-11-20
 
-C has no spec yet. Brainstorm and spec it first, then plan. It ports `spikes/windows-pe-specialization/src/pe.rs` into a generator crate, embeds the runtime template, specializes, and publishes atomically. When it deletes the spike, the same change must repoint three things:
+Spec: [`docs/superpowers/specs/2026-11-20-generator-packaging-core-design.md`](docs/superpowers/specs/2026-11-20-generator-packaging-core-design.md). Plan: [`docs/superpowers/plans/2026-11-20-generator-packaging-core.md`](docs/superpowers/plans/2026-11-20-generator-packaging-core.md). Evidence: [`docs/evidence/2026-11-20-generator-packaging-core.md`](docs/evidence/2026-11-20-generator-packaging-core.md). Branch `feat/generator-packaging-core`.
 
-- `specializer_path()` in `crates/webwrap-runtime/tests/inspect_self.rs`;
-- the `cargo build -p windows-pe-specialization-spike` step in `.github/workflows/windows.yml`;
-- the "Build the acceptance apps" step in the same workflow, which calls `webwrap-pe-specialize.exe`.
+- **`crates/webwrap-pack`** builds and validates the `AppSpec` and derives the slug from the host. It specializes both runtime templates in memory, stages and verifies them, then publishes `<slug>-x64.exe` and `<slug>-arm64.exe`.
+  - It replaces generated apps, including a different website with the same name, per the user. It refuses anything else, plus running or read-only apps.
+  - It is plain Rust, so its tests run on Linux.
+- **`crates/webwrap-generate`** is the CLI generator, with both templates embedded when it is built with `WEBWRAP_TEMPLATE_X64` and `WEBWRAP_TEMPLATE_ARM64`. F wraps the same library in its UI.
+- **`spikes/windows-pe-specialization` is gone.** B's tests specialize through `webwrap_pack::specialize_raw`.
+- **Known limits** (evidence section 5):
+  - a crafted executable at an output path can exhaust memory in `editpe`'s resource parser;
+  - a killed generation leaves `.webwrap-*.tmp` files;
+  - a file created in the instant before publishing can still be replaced.
 
-Carry forward from the plan's notes: the spike's `validate_text` bounds `displayName` in bytes, as `webwrap-spec` now does too. The spike's `validate_spec` is weaker than `AppSpec` validation, and C's generator should call `AppSpec::from_slice` instead.
+## Immediate next step: sub-project D, file bridge and adapters
+
+D has no spec yet. Brainstorm and spec it first, then plan. It covers:
+
+- porting the two WebView2 spikes (`spikes/photopea-windows-writeback`, `spikes/vscode-webview2-handle`) into the runtime, and deleting them;
+- the Photopea and `vscode.dev` adapters;
+- identity-derived single-instance IPC.
+
+Gates 6, 7, 8, and the save half of 4 and 5.
+
+D inherits:
+
+- B's four review findings (B evidence, section 6): pop-ups without a user gesture, the navigation hook failing open on unparseable URLs, iframes and `LaunchingExternalUriScheme`, and dropped-file arguments;
+- C's note that both architecture builds of one app share its storage folder, so the single-instance lock must span both.
+
+Ctrl+S write-back needs the user's PC for a hands-on run (`docs/windows-runs/`).
 
 ## How work runs now (since 2026-11-19)
 
@@ -94,8 +115,8 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
   - x64 only, and Wine has no WebView2, so nothing involving the window runs there.
 - **GitHub Actions (`.github/workflows/windows.yml`):** the authority for Windows behaviour.
   - Runs fmt, both suites, and clippy `-D warnings` natively on `windows-latest` (x64) and `windows-11-arm` (ARM64).
-  - Builds release acceptance apps from `docs/windows-runs/fixtures/` and uploads them as `acceptance-<triple>`.
-  - Smoke-launches them on real WebView2.
+  - Builds both release templates and the generator, generates the acceptance apps from `docs/windows-runs/fixtures/` icons, and uploads them, with the generator, as `acceptance-<triple>`.
+  - Probes regenerating over a running app, and smoke-launches the native pair on real WebView2.
 - **The user's Windows PC:** hands-on checks only.
   - Paste the prompt in [`docs/windows-runs/README.md`](docs/windows-runs/README.md).
   - Queue a run by committing `docs/windows-runs/NEXT.md`. It reads that file, downloads the CI artifacts, asks the user what is on screen, and pushes `docs/windows-runs/<date>-results.md`.
@@ -106,6 +127,6 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
 
-Sub-project A closes no release gate. B closed gates 11 and 14 only. Gates 1, 4, 5, 6, 7, and 8 belong to C, D, and E and must not be described as proven before then.
+Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. Gates 4, 5, 6, 7, and 8 belong to D and E, and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
 
 One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.

@@ -1,8 +1,6 @@
-//! Native integration tests. These need the `webwrap-pe-specialize` binary
-//! from `spikes/windows-pe-specialization`, which is still in the workspace
-//! precisely because spike removal is staged per porter. Sub-project C
-//! replaces `specializer_path` with the real generator and nothing else here
-//! changes.
+//! Native integration tests. Fixtures are specialized with
+//! `webwrap_pack::specialize_raw`, the unchecked primitive, so tests can also
+//! embed specifications the runtime must reject.
 
 use std::{
     fs,
@@ -61,35 +59,8 @@ fn unique(label: &str) -> PathBuf {
     ))
 }
 
-/// Directory holding the built `webwrap-runtime.exe`, which is also where
-/// cargo puts `webwrap-pe-specialize.exe`. Derived from the binary cargo
-/// names, not from this test's own path: since cargo 1.100's build-dir layout
-/// test binaries live under `build/<pkg>/<hash>/out/`, not beside the bins.
-fn build_dir() -> PathBuf {
-    Path::new(env!("CARGO_BIN_EXE_webwrap-runtime"))
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
 fn template_path() -> PathBuf {
-    let path = build_dir().join("webwrap-runtime.exe");
-    assert!(
-        path.is_file(),
-        "template not built at {}; run cargo build -p webwrap-runtime --target <triple>",
-        path.display()
-    );
-    path
-}
-
-fn specializer_path() -> PathBuf {
-    let path = build_dir().join("webwrap-pe-specialize.exe");
-    assert!(
-        path.is_file(),
-        "specializer not built at {}; run cargo build -p windows-pe-specialization-spike --target <triple>",
-        path.display()
-    );
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_webwrap-runtime"))
 }
 
 /// A minimal valid PNG for the icon argument: 1x1 opaque black.
@@ -106,62 +77,31 @@ const ICON_PNG: &[u8] = &[
 pub fn specialize_fixture(spec_json: &str, display_name: &str, version: &str) -> PathBuf {
     let dir = unique("case");
     fs::create_dir_all(&dir).unwrap();
-    let spec = dir.join("spec.json");
-    fs::write(&spec, spec_json).unwrap();
-    let icon = dir.join("icon.png");
-    fs::write(&icon, ICON_PNG).unwrap();
+    let template = fs::read(template_path()).unwrap();
+    let app = webwrap_pack::specialize_raw(
+        &template,
+        spec_json.as_bytes(),
+        ICON_PNG,
+        display_name,
+        version,
+    )
+    .unwrap();
     let output = dir.join("app.exe");
-
-    let status = Command::new(specializer_path())
-        .args([
-            "specialize",
-            "--input",
-            template_path().to_str().unwrap(),
-            "--output",
-            output.to_str().unwrap(),
-            "--spec",
-            spec.to_str().unwrap(),
-            "--icon",
-            icon.to_str().unwrap(),
-            "--display-name",
-            display_name,
-            "--version",
-            version,
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success(), "specialize failed with {status:?}");
-    assert!(output.is_file());
+    fs::write(&output, app).unwrap();
     output
-}
-
-fn inspect_with_specializer(exe: &Path) -> serde_json::Value {
-    let out = Command::new(specializer_path())
-        .args(["inspect", "--input", exe.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "inspect failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 #[test]
 fn the_template_carries_the_resources_specialization_needs() {
     let exe = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
-    let report = inspect_with_specializer(&exe);
+    let report = webwrap_pack::inspect(&fs::read(&exe).unwrap()).unwrap();
 
-    assert_eq!(
-        report["specBytes"].as_u64().unwrap() as usize,
-        PHOTOPEA_SPEC.len()
-    );
-    assert_eq!(report["iconPresent"], serde_json::json!(true));
+    assert_eq!(report.spec.as_deref(), Some(PHOTOPEA_SPEC.as_bytes()));
+    assert!(report.icon_present);
     // Proves the version strings were actually replaced rather than leaving a
     // stale value from the template's own VERSIONINFO.
-    assert_eq!(report["fileDescription"], serde_json::json!("Photopea"));
-    assert_eq!(report["productVersion"], serde_json::json!("1.0.0"));
+    assert_eq!(report.file_description.as_deref(), Some("Photopea"));
+    assert_eq!(report.product_version.as_deref(), Some("1.0.0"));
 }
 
 fn inspect_self(exe: &Path, check_urls: &[&str]) -> serde_json::Value {
@@ -268,8 +208,8 @@ fn unknown_arguments_are_a_usage_error() {
 #[test]
 fn a_specification_that_fails_validation_is_rejected_at_startup() {
     // appId does not match launchUrl, so invariant 2 must reject it. The
-    // specializer's own weaker validator accepts this, which is exactly why
-    // the runtime revalidates.
+    // generator never embeds such a spec, but specialize_raw does, and an app
+    // could be edited by other tools; the runtime is the authority.
     let mismatched = PHOTOPEA_SPEC.replace("873756fbe97a1384", "0000000000000000");
     let exe = specialize_fixture(&mismatched, "Photopea", "1.0.0");
     let out = Command::new(&exe).arg("--inspect-self").output().unwrap();
