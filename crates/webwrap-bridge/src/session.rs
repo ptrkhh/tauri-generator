@@ -34,6 +34,10 @@ pub enum PageMessage {
     /// can never fill in for a different save of the same file.
     #[serde(rename = "webwrap-save-commit")]
     SaveCommit { token: String, save: u64 },
+    /// The `vscodeDev` adapter could not get vscode.dev to open these
+    /// delivered files. The app tells the user.
+    #[serde(rename = "webwrap-open-failed")]
+    OpenFailed { tokens: Vec<String> },
 }
 
 /// Parse the JSON text a page posted as a string with
@@ -384,6 +388,20 @@ impl Session {
     pub fn name(&self, token: u64) -> Option<&str> {
         self.entries.get(&token).map(|entry| entry.name.as_str())
     }
+
+    /// The name of a file delivered to the trusted page that names it.
+    pub fn delivered_name(&self, source: &str, live: &str, token: &str) -> Result<&str, Refusal> {
+        self.check_sources(source, live)?;
+        let id: u64 = token.parse().map_err(|_| Refusal::UnknownToken)?;
+        match self.entries.get(&id) {
+            Some(entry)
+                if id.to_string() == token && matches!(entry.state, State::Delivered(_)) =>
+            {
+                Ok(&entry.name)
+            }
+            _ => Err(Refusal::UnknownToken),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -439,6 +457,12 @@ mod tests {
             Some(PageMessage::SaveCommit {
                 token: "3".into(),
                 save: 9
+            })
+        );
+        assert_eq!(
+            parse_page_message(r#"{"type":"webwrap-open-failed","tokens":["3","4"]}"#),
+            Some(PageMessage::OpenFailed {
+                tokens: vec!["3".into(), "4".into()]
             })
         );
         for other in [
@@ -580,6 +604,40 @@ mod tests {
         // A trusted navigation never holds anything back.
         s.navigation_starting(8, "https://app.test/next");
         assert!(s.may_post(HOME));
+    }
+
+    #[test]
+    fn only_a_trusted_page_can_name_a_file_it_was_given() {
+        let mut s = session();
+        s.open(path("queued.md"), HOME);
+        let token = delivered(&mut s, "given.md").to_string();
+        assert_eq!(s.delivered_name(HOME, HOME, &token), Ok("given.md"));
+        assert_eq!(
+            s.delivered_name(AWAY, HOME, &token),
+            Err(Refusal::Untrusted)
+        );
+        assert_eq!(
+            s.delivered_name(HOME, AWAY, &token),
+            Err(Refusal::Untrusted)
+        );
+        // Not yet delivered, unknown, or spelled differently.
+        assert_eq!(
+            s.delivered_name(HOME, HOME, "1"),
+            Err(Refusal::UnknownToken)
+        );
+        assert_eq!(
+            s.delivered_name(HOME, HOME, "999"),
+            Err(Refusal::UnknownToken)
+        );
+        assert_eq!(
+            s.delivered_name(HOME, HOME, &format!("0{token}")),
+            Err(Refusal::UnknownToken)
+        );
+        s.document_changed(NAV, AWAY);
+        assert_eq!(
+            s.delivered_name(HOME, HOME, &token),
+            Err(Refusal::UnknownToken)
+        );
     }
 
     #[test]

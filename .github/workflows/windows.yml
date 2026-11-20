@@ -7,6 +7,10 @@ on:
     branches: [main, "feat/**"]
   pull_request:
   workflow_dispatch:
+  # Weekly, so a change to vscode.dev that breaks its adapter shows up as a
+  # red run rather than as a user's report.
+  schedule:
+    - cron: "17 5 * * 1"
 
 jobs:
   test:
@@ -68,6 +72,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & $gen generate --url twitter.com --name Twitter --icon "$fx/twitter-blue.png" --out acceptance
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $gen generate --url vscode.dev --name "VS Code" --icon "$fx/twitter-blue.png" --out acceptance `
+            --adapter vscodeDev --assoc .md text/markdown "Markdown document"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           Copy-Item $env:WEBWRAP_TEMPLATE_X64 acceptance/unspecialized-template-x64.exe
           Copy-Item $env:WEBWRAP_TEMPLATE_ARM64 acceptance/unspecialized-template-arm64.exe
           Copy-Item $gen acceptance/
@@ -98,7 +105,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: End-to-end file bridge (D1)
+      - name: End-to-end file bridge (D1, and D2 against a local stand-in)
         shell: pwsh
         timeout-minutes: 15
         env:
@@ -112,6 +119,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & $gen generate --url https://localhost:8444/ --name "Bridge B" --slug bridge-b --icon "$fx/twitter-blue.png" --out e2e-apps
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $gen generate --url https://localhost:8445/ --name "Bridge C" --slug bridge-c --icon "$fx/twitter-blue.png" --out e2e-apps --adapter vscodeDev
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           # A throwaway certificate for the test server; the apps accept it only
           # because the test passes --ignore-certificate-errors to WebView2.
           $cert = New-SelfSignedCertificate -DnsName localhost -CertStoreLocation Cert:\CurrentUser\My
@@ -120,7 +129,26 @@ jobs:
             -Password (ConvertTo-SecureString webwrap -AsPlainText -Force) | Out-Null
           $env:WEBWRAP_E2E_APP_A = (Resolve-Path "e2e-apps/bridge-a-$native.exe").Path
           $env:WEBWRAP_E2E_APP_B = (Resolve-Path "e2e-apps/bridge-b-$native.exe").Path
+          $env:WEBWRAP_E2E_APP_C = (Resolve-Path "e2e-apps/bridge-c-$native.exe").Path
           node e2e/bridge.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: End-to-end against live vscode.dev (D2)
+        # Its own step, so a vscode.dev outage or change reads as this step
+        # failing, and runs even when the local checks failed.
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          T: ${{ matrix.target }}
+        run: |
+          $native = if ($env:T -like 'aarch64*') { 'arm64' } else { 'x64' }
+          $gen = "target/$env:T/release/webwrap-generate.exe"
+          New-Item -ItemType Directory -Force e2e-live | Out-Null
+          & $gen generate --url https://vscode.dev/ --name "VS Code Live" --slug vscode-live `
+            --icon docs/windows-runs/fixtures/twitter-blue.png --out e2e-live --adapter vscodeDev
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $env:WEBWRAP_E2E_APP_VSCODE = (Resolve-Path "e2e-live/vscode-live-$native.exe").Path
+          node e2e/vscode-live.mjs
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Screenshot the desktop after a failure
         if: failure()
@@ -135,4 +163,7 @@ jobs:
         if: failure()
         with:
           name: failure-screenshot-${{ matrix.target }}
-          path: ${{ runner.temp }}/failure.png
+          path: |
+            ${{ runner.temp }}/failure.png
+            ${{ runner.temp }}/vscode-live.png
+          if-no-files-found: ignore

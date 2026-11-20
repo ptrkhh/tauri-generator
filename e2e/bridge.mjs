@@ -1,35 +1,33 @@
-// End-to-end checks of the D1 file bridge against real generated apps on
-// real WebView2. Run by .github/workflows/windows.yml; needs:
+// End-to-end checks of the file bridge against real generated apps on real
+// WebView2. Run by .github/workflows/windows.yml; needs:
 //   WEBWRAP_E2E_APP_A  generated app for https://localhost:8443/
 //   WEBWRAP_E2E_APP_B  generated app for https://localhost:8444/
+//   WEBWRAP_E2E_APP_C  generated app for https://localhost:8445/, --adapter vscodeDev
 //   WEBWRAP_E2E_PFX    certificate for localhost, password "webwrap"
-// The apps' stderr carries one `webwrap: <event>` line per native decision,
-// which is how the native side is observed without test hooks.
 
-import { spawn, execFileSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { attach, sleep, until } from './cdp.mjs';
+import { assert, check, forward, launch, logged, makeFile, outside, required, run, sha256, work } from './apps.mjs';
 
 const APP_A = required('WEBWRAP_E2E_APP_A');
 const APP_B = required('WEBWRAP_E2E_APP_B');
+const APP_C = required('WEBWRAP_E2E_APP_C');
 const PFX = fs.readFileSync(required('WEBWRAP_E2E_PFX'));
 const HOME_A = 'https://localhost:8443';
 const HOME_B = 'https://localhost:8444';
+const HOME_C = 'https://localhost:8445';
 const AWAY_A = 'https://127.0.0.1:8443'; // same server, different origin
+const AWAY_C = 'https://127.0.0.1:8445';
 const DEBUG_A = 9301;
 const DEBUG_B = 9302;
+const DEBUG_C = 9303;
 const MiB = 1024 * 1024;
-
-function required(name) {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is not set`);
-  return value;
-}
 
 const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
 <a id=pop href="http://127.0.0.1:9/popup-clicked" target=_blank
@@ -38,11 +36,75 @@ const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
   // A pop-up opened by the page's own script, with no click: B's finding 1.
   if (location.search === '?autopopup') setTimeout(() => window.open('https://example.com/scripted'), 300);
 </script>`;
-for (const port of [8443, 8444]) {
+
+// A stand-in for vscode.dev, matching it where the vscodeDev adapter relies on
+// it (checked against live vscode.dev): a Ctrl+Shift+P keydown, even a
+// constructed one, opens a command palette that closes when it loses focus;
+// its input filters to a highlighted entry, a little later; clicking "File:
+// Open File..." asks showOpenFilePicker for one file, adds a tab, and later
+// makes it the active tab and focuses its editor. Like vscode.dev while it
+// restores editors, it takes focus once, during the first palette.
+// `?nopalette` ignores Ctrl+Shift+P.
+const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-in</title>
+<div class=monaco-workbench>
+  <div id=tabs></div>
+  <div class=monaco-editor><textarea id=editor></textarea></div>
+  <input id=palette hidden aria-activedescendant=entry><div id=entry role=option></div>
+</div>
+<script>
+  window.__opened = [];
+  window.__keys = 0; // trusted key events: what a person, or DevTools, sends
+  window.__trail = []; // what happened, for a failure report
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let stealFocus = true;
+  addEventListener('keydown', (event) => {
+    if (event.isTrusted) __keys++;
+    __trail.push(\`keydown \${event.key} ctrl=\${event.ctrlKey} shift=\${event.shiftKey} trusted=\${event.isTrusted}\`);
+    if (location.search !== '?nopalette' && event.ctrlKey && event.shiftKey && event.code === 'KeyP') {
+      palette.hidden = false;
+      palette.value = '>';
+      entry.textContent = '';
+      palette.focus();
+      if (stealFocus) {
+        stealFocus = false;
+        setTimeout(() => { __trail.push('focus stolen'); editor.focus(); }, 100);
+      }
+    }
+  }, true);
+  palette.addEventListener('blur', () => { palette.hidden = true; });
+  palette.addEventListener('input', () => {
+    __trail.push('input ' + palette.value);
+    setTimeout(() => {
+      entry.textContent = palette.value === '>Open File...' ? 'File: Open File...Ctrl+O' : '';
+    }, 300);
+  });
+  entry.addEventListener('click', async () => {
+    __trail.push('click ' + entry.textContent);
+    if (!entry.textContent || palette.hidden) return;
+    palette.hidden = true;
+    const [handle] = await showOpenFilePicker({ multiple: false });
+    __trail.push('picker returned ' + handle?.name);
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.innerHTML = '<span class=label-name></span>';
+    tab.firstChild.textContent = handle.name;
+    tabs.append(tab);
+    await sleep(300);
+    const file = await handle.getFile().catch((error) => {
+      __trail.push('getFile failed: ' + error);
+      throw error;
+    });
+    __opened.push({ name: file.name, text: await file.text(), handle });
+    for (const other of tabs.children) other.classList.toggle('active', other === tab);
+    editor.focus();
+  });
+</script>`;
+
+for (const [port, page] of [[8443, PAGE], [8444, PAGE], [8445, VSCODE_STAND_IN]]) {
   https
     .createServer({ pfx: PFX, passphrase: 'webwrap' }, (_, response) => {
       response.writeHead(200, { 'content-type': 'text/html' });
-      response.end(PAGE);
+      response.end(page);
     })
     .listen(port);
 }
@@ -82,82 +144,26 @@ const RECEIVER = `(() => {
   ww.ready = () => post({ type: 'webwrap-ready' });
 })()`;
 
-const children = [];
-function launch(exe, debugPort, args = []) {
-  const child = spawn(exe, args, {
-    env: {
-      ...process.env,
-      // Test only: a debugging port to drive the page, and acceptance of the
-      // test server's self-signed certificate.
-      WEBWRAP_TEST_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort} --ignore-certificate-errors`,
-    },
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  child.log = '';
-  let partial = '';
-  child.stderr.on('data', (chunk) => {
-    child.log += chunk;
-    // Print whole lines only, so two apps' output never interleaves mid-line.
-    const lines = (partial + chunk).split('\n');
-    partial = lines.pop();
-    for (const line of lines) process.stdout.write(`  [${path.basename(exe)} ${child.pid}] ${line}\n`);
-  });
-  child.exitCode$ = new Promise((resolve) => child.on('exit', resolve));
-  child.on('exit', (code) => process.stdout.write(`  [${path.basename(exe)} ${child.pid}] exited ${code}\n`));
-  children.push(child);
-  return child;
-}
-
-const work = fs.mkdtempSync(path.join(os.tmpdir(), 'webwrap-e2e-'));
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-function makeFile(name, content) {
-  const file = path.join(work, name);
-  fs.writeFileSync(file, content);
-  return file;
-}
-
-/** Launch an app again with a file; it must hand it over and exit 0. */
-async function forward(exe, debugPort, file) {
-  const second = launch(exe, debugPort, file ? [file] : []);
-  const code = await Promise.race([second.exitCode$, sleep(20000).then(() => 'timeout')]);
-  if (code !== 0) throw new Error(`second launch of ${path.basename(exe)} ended with ${code}`);
-}
-
 const received = (page, name) =>
   until(() => page.evaluate(`window.__ww?.files.find((f) => f.name === ${JSON.stringify(name)})`), `${name} to arrive`);
 const result = (page, token) =>
   until(() => page.evaluate(`window.__ww?.results.find((r) => r.token === ${JSON.stringify(token)})`), `save result for ${token}`);
-const logged = (app, pattern, what) => until(() => pattern.test(app.log), what);
+/** The text of a file the vscode stand-in opened. */
+const opened = (page, name) =>
+  until(() => page.evaluate(`window.__opened?.find((f) => f.name === ${JSON.stringify(name)})?.text`), `${name} to open`, 45000);
+/** For a failed vscodeDev check: the stand-in's trail and the page's errors. */
+const explainStandIn = (page) => async () =>
+  [`  url ${await page.evaluate('location.href')}`,
+    ...(await page.evaluate('window.__trail ?? []')).map((line) => `  trail: ${line}`),
+    ...page.problems.slice(-20).map((line) => `  ${line}`)].join('\n');
+const count = (app, pattern) => (app.log.match(new RegExp(pattern, 'g')) ?? []).length;
 
-async function check(name, body) {
-  process.stdout.write(`- ${name}\n`);
-  await body();
-  process.stdout.write(`  PASS ${name}\n`);
-}
-
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
-}
-
-/** Saving must never leave its temporary or backup files behind. */
+/** Saving must never leave its temporary, backup, or swap files behind. */
 function noLeftovers() {
-  const left = fs.readdirSync(work).filter((name) => name.startsWith('.webwrap-'));
+  const left = [work, outside]
+    .flatMap((dir) => fs.readdirSync(dir))
+    .filter((name) => name.startsWith('.webwrap-') || name.endsWith('.crswap'));
   assert(left.length === 0, `left behind: ${left.join(', ')}`);
-}
-
-/** What a failure report needs: which apps still run, and WebView2's flags. */
-function diagnose() {
-  for (const child of children) {
-    process.stdout.write(`  app ${child.pid}: exit ${child.exitCode ?? 'still running'}\n`);
-  }
-  try {
-    const script = "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | " +
-      "Where-Object { $_.CommandLine -notmatch '--type=' } | Select-Object ProcessId, CommandLine | Format-List | Out-String -Width 4000";
-    process.stdout.write(execFileSync('powershell', ['-NoProfile', '-Command', script]).toString());
-    process.stdout.write(execFileSync('netstat', ['-ano']).toString().split('\n').filter((l) => /:930[12]\b/.test(l)).join('\n') + '\n');
-  } catch (error) {
-    process.stdout.write(`  (diagnostics failed: ${error.message})\n`);
-  }
 }
 
 async function main() {
@@ -315,18 +321,126 @@ async function main() {
     await sleep(1000);
     assert((await pageA.evaluate('location.origin')) === HOME_A, 'the page navigated away');
   });
+
+  await checkVscodeAdapter();
 }
 
-let failed = false;
-try {
-  await main();
-  process.stdout.write('ALL PASS\n');
-} catch (error) {
-  failed = true;
-  process.stdout.write(`FAIL: ${error.stack}\n`);
-  diagnose();
-} finally {
-  for (const child of children) child.kill();
-  fs.rmSync(work, { recursive: true, force: true });
-  process.exit(failed ? 1 : 0);
+/** D2: the vscodeDev adapter against the local stand-in. */
+async function checkVscodeAdapter() {
+  const onePath = makeFile('one.md', 'first file', outside);
+  const c = launch(APP_C, DEBUG_C, [onePath]);
+  const pageC = await attach(DEBUG_C, HOME_C);
+  await pageC.loaded(HOME_C);
+
+  await check('vscodeDev: files WebView2 would refuse a site are refused with a message; others open and save', async () => {
+    assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
+    // Measured in CI (D2 evidence): WebView2 refuses a site's handle, for reading
+    // or writing, inside these folders and for paths over 260 characters.
+    const home = os.homedir();
+    const refused = {
+      'LOCALAPPDATA\\Temp': work,
+      'APPDATA (Roaming)': process.env.APPDATA,
+      'ProgramData': process.env.ProgramData,
+      'over 260 characters': path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`)),
+    };
+    // A network share, as mapped drives and redirected folders are: the
+    // runner's own administrative share, if it has one.
+    const share = `\\\\localhost\\${outside[0]}$${outside.slice(2)}`;
+    if (fs.existsSync(share)) refused['network share'] = share;
+    else process.stdout.write(`  (no administrative share at ${share}; the share case is skipped)\n`);
+    const allowed = { 'Documents': path.join(home, 'Documents'), 'home folder': home };
+    const place = ([where, dir], i, prefix) => {
+      fs.mkdirSync(dir, { recursive: true });
+      return { where, file: makeFile(`${prefix}-${i}.md`, `${prefix} ${i}`, dir) };
+    };
+    const no = Object.entries(refused).map((entry, i) => place(entry, i, 'refused'));
+    const yes = Object.entries(allowed).map((entry, i) => place(entry, i, 'allowed'));
+    try {
+      await forward(APP_C, DEBUG_C, ...no.map((p) => p.file), ...yes.map((p) => p.file));
+      for (const { where, file } of no) {
+        const name = path.basename(file).replace('.', '\\.');
+        await logged(c, new RegExp(`open-failed ${name}: vscode\\.dev cannot use files`), `${where} refused`);
+      }
+      for (const { where, file } of yes) {
+        const name = path.basename(file);
+        assert((await opened(pageC, name)) === name.replace('-', ' ').replace('.md', ''), `${where}: wrong text`);
+        await pageC.evaluate(`(async () => {
+          const writable = await __opened.find((f) => f.name === ${JSON.stringify(name)}).handle.createWritable();
+          await writable.write('saved');
+          await writable.close();
+          return true;
+        })()`);
+        assert(fs.readFileSync(file, 'utf8') === 'saved', `${where}: not saved`);
+        assert(!fs.existsSync(`${file}.crswap`), `${where}: the swap file was left behind`);
+      }
+      const names = await pageC.evaluate('__opened.map((f) => f.name).join()');
+      assert(!/refused/.test(names), `a refused file reached the page: ${names}`);
+    } finally {
+      for (const { file } of [...no, ...yes]) fs.rmSync(file, { force: true });
+    }
+  }, explainStandIn(pageC));
+
+  await check('vscodeDev: a file given at launch opens through Open File and saves through its handle', async () => {
+    assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
+    await logged(c, /delivered one\.md/, 'the handle delivery in the log');
+    const trail = await pageC.evaluate('__trail');
+    assert(trail.includes('focus stolen'), 'the stand-in never took focus mid-run, so the restart went untested');
+    const created = fs.statSync(onePath).birthtimeMs;
+    await pageC.evaluate(`(async () => {
+      const writable = await __opened.find((f) => f.name === 'one.md').handle.createWritable();
+      await writable.write('saved through the handle');
+      await writable.close();
+      return true;
+    })()`);
+    assert(fs.readFileSync(onePath, 'utf8') === 'saved through the handle', 'one.md not changed');
+    noLeftovers();
+    // Recorded, not asserted: WebView2, not the runtime, performs this write.
+    const kept = fs.statSync(onePath).birthtimeMs === created;
+    process.stdout.write(`  observed: a handle save ${kept ? 'keeps' : 'does not keep'} the creation time\n`);
+  }, explainStandIn(pageC));
+
+  await check('vscodeDev: two files from a second launch open one after the other, typing nothing', async () => {
+    await forward(APP_C, DEBUG_C, makeFile('two.md', 'second file', outside), makeFile('three.md', 'third file', outside));
+    assert((await opened(pageC, 'two.md')) === 'second file', 'two.md opened with the wrong text');
+    assert((await opened(pageC, 'three.md')) === 'third file', 'three.md opened with the wrong text');
+    await sleep(2000);
+    const seen = await pageC.evaluate(`[__opened.map((f) => f.name).join(), editor.value, __keys]`);
+    assert(/^one\.md,(allowed-\d\.md,)+two\.md,three\.md$/.test(seen[0]), `opened ${seen[0]}`);
+    assert(seen[1] === '' && seen[2] === 0, `input reached the page: editor "${seen[1]}", ${seen[2]} key events`);
+  }, explainStandIn(pageC));
+
+  await check('gate 8, vscodeDev: no handle after navigating to an untrusted origin', async () => {
+    await pageC.evaluate(`location.href = ${JSON.stringify(AWAY_C + '/')}`);
+    await pageC.loaded(AWAY_C);
+    await logged(c, /revoked \d+ file tokens/, 'revocation in the log');
+    await pageC.evaluate(`(() => {
+      window.__messages = 0;
+      chrome.webview.addEventListener('message', () => __messages++);
+      for (const message of [{ type: 'webwrap-ready' }, { type: 'webwrap-open-failed', tokens: ['1'] }]) {
+        chrome.webview.postMessage(JSON.stringify(message));
+      }
+    })()`);
+    await logged(c, /delivery-refused the page is not on a trusted origin/, 'refused readiness');
+    await logged(c, /open-failed-refused the page is not on a trusted origin/, 'refused failure report');
+    await forward(APP_C, DEBUG_C, makeFile('while-away.md', 'opened after returning', outside));
+    await sleep(3000);
+    const seen = await pageC.evaluate('[__messages, __opened.length]');
+    assert(seen.join() === '0,0', `the untrusted page got messages, files: ${seen}`);
+
+    await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/')}`);
+    await pageC.loaded(HOME_C);
+    assert((await opened(pageC, 'while-away.md')) === 'opened after returning', 'while-away.md text');
+  }, explainStandIn(pageC));
+
+  await check('vscodeDev: when Open File cannot run, the user is told once', async () => {
+    await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/?nopalette')}`);
+    await pageC.loaded(HOME_C);
+    await forward(APP_C, DEBUG_C, makeFile('no-palette.md', 'never opened', outside));
+    // The adapter keeps trying to open the palette for 30 s first.
+    await until(() => /open-failed no-palette\.md/.test(c.log), 'the failure in the log', 45000);
+    await sleep(5000);
+    assert(count(c, 'open-failed no-palette') === 1, 'the failure was reported more than once');
+  }, explainStandIn(pageC));
 }
+
+run(main);

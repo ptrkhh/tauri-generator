@@ -3,13 +3,14 @@
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Poll `probe` until it returns something truthy. Errors count as "not yet". */
+/** Poll `probe` until it returns something truthy. Errors count as "not yet",
+ * and a probe that never settles cannot outlast the deadline. */
 export async function until(probe, what, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
     try {
-      const value = await probe();
+      const value = await Promise.race([probe(), sleep(Math.max(0, deadline - Date.now()))]);
       if (value) return value;
     } catch (error) {
       last = error;
@@ -32,8 +33,16 @@ export async function attach(port, urlPrefix) {
   });
   let nextId = 0;
   const pending = new Map();
+  /** The page's exceptions and console errors, for failure reports. */
+  const problems = [];
   socket.onmessage = (event) => {
     const message = JSON.parse(event.data);
+    if (message.method === 'Runtime.exceptionThrown') {
+      const { exception, text } = message.params.exceptionDetails;
+      problems.push(`exception: ${exception?.description ?? text}`);
+    } else if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
+      problems.push(`console.error: ${message.params.args.map((a) => a.value ?? a.description).join(' ')}`);
+    }
     const waiter = pending.get(message.id);
     if (!waiter) return;
     pending.delete(message.id);
@@ -45,6 +54,8 @@ export async function attach(port, urlPrefix) {
       const id = ++nextId;
       pending.set(id, { resolve, reject });
       socket.send(JSON.stringify({ id, method, params }));
+      // A page that stops answering fails the check rather than the CI step's timeout.
+      setTimeout(() => pending.delete(id) && reject(new Error(`${method} got no answer in 120 s`)), 120000).unref();
     });
   const evaluate = async (expression) => {
     const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
@@ -61,5 +72,6 @@ export async function attach(port, urlPrefix) {
       `${origin} to load`,
       60000,
     );
-  return { send, evaluate, loaded, close: () => socket.close() };
+  await send('Runtime.enable');
+  return { send, evaluate, loaded, problems, close: () => socket.close() };
 }

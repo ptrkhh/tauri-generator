@@ -62,6 +62,62 @@ pub fn display_name(path: &Path) -> String {
     }
 }
 
+/// Folders WebView2 does not let a site use a file handle in, read from the
+/// environment: Windows keeps them for apps. Empty where the variables are
+/// unset, as on Linux.
+pub fn protected_folders() -> Vec<PathBuf> {
+    PROTECTED_FOLDER_VARIABLES
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dunce::canonicalize(&dir).unwrap_or(dir))
+        .collect()
+}
+
+const PROTECTED_FOLDER_VARIABLES: [&str; 7] = [
+    "LOCALAPPDATA",
+    "APPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "SystemRoot",
+];
+
+/// Why WebView2 would refuse a site's file handle for `path`, if it would:
+/// on a network share, inside one of the `protected` folders, or 260
+/// characters or longer. All three were measured in CI (D2 evidence). Case
+/// is ignored, as Windows does.
+pub fn handle_refusal(path: &Path, protected: &[PathBuf]) -> Option<&'static str> {
+    let text = path.to_string_lossy();
+    // Canonical paths keep `\\?\` on every share (`\\?\UNC\…`) and on long
+    // local paths; the length that matters is without it.
+    let local = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    if local.starts_with(r"\\") || local.starts_with(r"UNC\") {
+        return Some(
+            "vscode.dev cannot use files on network shares or mapped network drives. \
+             Copy the file to a folder on this PC, such as Documents, and open the copy.",
+        );
+    }
+    if local.encode_utf16().count() >= 260 {
+        return Some(
+            "vscode.dev cannot use files whose full path is 260 characters or longer. \
+             Copy the file to a folder with a shorter path, such as Documents, and open the copy.",
+        );
+    }
+    let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+    let path = lower(path);
+    protected
+        .iter()
+        .filter(|root| root.is_absolute())
+        .any(|root| path.starts_with(lower(root)))
+        .then_some(
+            "vscode.dev cannot use files in folders Windows keeps for apps, such as AppData. \
+             Copy the file to another folder, such as Documents, and open the copy.",
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +184,33 @@ mod tests {
         assert_eq!(display_name(Path::new("/x/y/photo.psd")), "photo.psd");
         assert_eq!(display_name(Path::new("/x/a\nb.md")), "a_b.md");
         assert_eq!(display_name(Path::new("/")), "file");
+    }
+
+    #[test]
+    fn handles_are_refused_on_shares_inside_protected_folders_and_for_long_paths() {
+        let base = std::env::temp_dir();
+        let protected = [
+            base.join("Users/Me/AppData/Local"),
+            PathBuf::from("relative"),
+        ];
+        let refused = |path: PathBuf| handle_refusal(&path, &protected);
+        assert!(refused(base.join("Users/Me/AppData/Local/Temp/a.md")).is_some());
+        assert!(refused(base.join("users/me/appdata/LOCAL/a.md")).is_some());
+        assert!(refused(base.join("Users/Me/Documents/a.md")).is_none());
+        // Whole folder names only, and a relative entry protects nothing.
+        assert!(refused(base.join("Users/Me/AppData/LocalCopy/a.md")).is_none());
+        assert!(refused(base.join("relative/a.md")).is_none());
+        // Length is counted without the prefix.
+        let long = format!(r"\\?\C:\{}\a.md", "x".repeat(260));
+        assert!(refused(PathBuf::from(long)).unwrap().contains("260"));
+        let short = format!(r"\\?\C:\{}\a.md", "x".repeat(200));
+        assert!(refused(PathBuf::from(short)).is_none());
+        // Shares, however short, and however spelled.
+        for share in [r"\\?\UNC\server\share\a.md", r"\\server\share\a.md"] {
+            assert!(
+                refused(PathBuf::from(share)).unwrap().contains("network"),
+                "{share}"
+            );
+        }
     }
 }

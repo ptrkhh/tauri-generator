@@ -57,7 +57,7 @@ The follow-on work was brainstormed on 2026-09-16. The Windows track is split in
 | A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | **done**, reviewed, 38 tests |
 | B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **done**, reviewed, 12 tests, Windows-verified |
 | C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (Windows half), 3 | **done**, reviewed, Windows-verified in CI |
-| D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **in progress**: D1 done (6, 7, 8), reviewed, Windows-verified in CI; D2 next |
+| D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **in progress**: D1 done (6, 7, 8); D2 done (save half of 5), reviewed, verified in CI against live `vscode.dev`; D3 next |
 | E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
 | F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
@@ -104,16 +104,38 @@ Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](d
 - **CI end-to-end.** `e2e/bridge.mjs` drives two generated apps through the DevTools protocol and reads their `webwrap: <event>` stderr lines. The apps get their DevTools port from the test-only `WEBWRAP_TEST_BROWSER_ARGUMENTS`, because WebView2 ignores its own `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` once wry passes arguments.
 - **Known limits:** evidence section 6.
 
-## Immediate next step: D2, the `vscode.dev` adapter
+### Sub-project D2, done 2026-11-20
 
-Write D2's plan from the spec's D2 section. It ports `spikes/vscode-webview2-handle` onto D1's bridge, then deletes the spike:
+Plan: [`docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md`](docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md). Evidence: [`docs/evidence/2026-11-20-vscode-dev-adapter.md`](docs/evidence/2026-11-20-vscode-dev-adapter.md). Branch `feat/vscode-adapter`. The spike `spikes/vscode-webview2-handle` is deleted.
 
-- create a read-write `FileSystemFileHandle` for the token's path;
-- post it to the page;
-- drive vscode.dev's Open File command;
-- verify Ctrl+S, and Ctrl+O through WebView2's own picker.
+- **How a file opens.** For `adapter: vscodeDev`:
+  - the runtime posts a read-write `FileSystemFileHandle` instead of a shared buffer;
+  - the page script `crates/webwrap-runtime/src/vscode.js` runs vscode.dev's own Open File and hands vscode.dev that handle;
+  - vscode.dev's Ctrl+S writes through the handle.
+- **The script uses constructed events only**, never typed input:
+  - Ctrl+Shift+P, then setting the palette's value, then clicking the "Open File..." row;
+  - a constructed Enter is ignored by vscode.dev;
+  - the runtime sends no input at all.
 
-The live-site test joins the end-to-end step, and a weekly scheduled run guards against changes to `vscode.dev`. D3 (Photopea) and D4 (generic sites) follow.
+  The spike's DevTools key events could type into the user's file, which the review found.
+- **WebView2 refuses a site's handle** inside `%LOCALAPPDATA%` (including `%TEMP%`), `%APPDATA%`, and `%ProgramData%`, on network shares, and for paths of 260 characters or more. This was measured in CI, so the runtime refuses those files up front with a message.
+  - **Test files for handles must live outside AppData.** `e2e/apps.mjs` exports `outside` for that.
+  - A save through a handle does not keep the creation time.
+- **Tests.**
+  - `e2e/bridge.mjs` adds a local stand-in for vscode.dev, `bridge-c`.
+  - `e2e/vscode-live.mjs` drives live vscode.dev in its own CI step, which also runs weekly (`schedule`).
+- **Known limits:** evidence section 7.
+
+## Immediate next step: D3, the Photopea adapter
+
+Write D3's plan from the spec's D3 section. It ports `spikes/photopea-windows-writeback`, then deletes the spike:
+
+- a local shell page embeds Photopea in an iframe and speaks its Live Messaging API;
+- the file reaches the shell through D1's shared buffer;
+- saving goes through Photopea's custom-I/O `save` hook and D1's save buffer, then `ReplaceFileW`;
+- Ctrl+O goes through the native Windows open dialog.
+
+D3's evidence needs a real PSD of at least 150 MB opening and saving, against live Photopea, in the same CI pattern as D2's live step. D4 (generic sites) follows.
 
 Still open from earlier sub-projects:
 
@@ -143,6 +165,6 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
 
-Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. Gates 4 and 5 belong to D2, D3, and E, and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
+Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. D2 closed the save half of gate 5. Gate 4's save half belongs to D3, and the "Open with" and double-click halves of gates 4 and 5 to E; none of these may be described as proven before then. Gate 1 also needs F and the phase-2 APK.
 
 One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.

@@ -26,11 +26,13 @@ use webview2_com::{
     NavigationStartingEventHandler, WebMessageReceivedEventHandler,
 };
 use webwrap_bridge::{
-    check_file, parse_page_message, AfterRead, Delivery, PageMessage, Refusal, Session,
-    LEAVING_TIMEOUT, MAX_FILE_BYTES,
+    check_file, handle_refusal, parse_page_message, protected_folders, AfterRead, Delivery,
+    PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
 };
+use webwrap_spec::Adapter;
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
 
+use crate::vscode;
 use crate::{report, save};
 
 /// The UI thread's WebView2 objects and the shared buffers in use, by token.
@@ -98,6 +100,7 @@ pub struct Bridge {
     writing: Arc<AtomicUsize>,
     close_when_written: Arc<AtomicBool>,
     recheck_scheduled: Arc<AtomicBool>,
+    adapter: Adapter,
 }
 
 /// What the page is told when a write fails. The reason, which names local
@@ -111,6 +114,7 @@ impl Bridge {
     pub fn install(
         window: &WebviewWindow,
         trusted_origins: Vec<String>,
+        adapter: Adapter,
         files: Vec<PathBuf>,
     ) -> tauri::Result<Self> {
         let bridge = Bridge {
@@ -119,6 +123,7 @@ impl Bridge {
             writing: Arc::new(AtomicUsize::new(0)),
             close_when_written: Arc::new(AtomicBool::new(false)),
             recheck_scheduled: Arc::new(AtomicBool::new(false)),
+            adapter,
         };
         let installer = bridge.clone();
         window.with_webview(move |platform| {
@@ -316,6 +321,41 @@ impl Bridge {
                     Err(refusal) => self.refuse_save(&token, refusal),
                 }
             }
+            PageMessage::OpenFailed { tokens } => {
+                if self.adapter != Adapter::VscodeDev {
+                    return report::log("open-failed-refused this app has no vscode.dev adapter");
+                }
+                let named: Result<Vec<String>, Refusal> = {
+                    let session = self.session();
+                    tokens
+                        .iter()
+                        .take(MAX_FILES)
+                        .map(|token| {
+                            session
+                                .delivered_name(source, live, token)
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                };
+                match named {
+                    Ok(names) if !names.is_empty() => {
+                        report::log(format_args!(
+                            "open-failed {}: vscode.dev did not open it",
+                            names.join(", ")
+                        ));
+                        report::error_box_async(format!(
+                            "vscode.dev did not open these files: its Open File command did not respond.\n\n\
+                             {}\n\n\
+                             They are waiting. Choose File > Open File... in vscode.dev to open them.",
+                            names.join("\n")
+                        ));
+                    }
+                    Ok(_) => report::log("open-failed-refused no file was named"),
+                    Err(refusal) => {
+                        report::log(format_args!("open-failed-refused {refusal}; {source}"))
+                    }
+                }
+            }
         }
     }
 
@@ -323,7 +363,11 @@ impl Bridge {
 
     fn start(&self, deliveries: Vec<Delivery>) {
         for delivery in deliveries {
-            if let Err(error) = self.begin_read(&delivery) {
+            let started = match self.adapter {
+                Adapter::VscodeDev => self.post_handle(&delivery),
+                _ => self.begin_read(&delivery),
+            };
+            if let Err(error) = started {
                 self.delivery_failed(&delivery, error);
             }
         }
@@ -412,6 +456,35 @@ impl Bridge {
                 self.start(more);
             }
         }
+    }
+
+    /// The `vscodeDev` delivery: a read-write handle instead of the bytes.
+    fn post_handle(&self, delivery: &Delivery) -> Result<(), String> {
+        // Told now, rather than by a security error inside vscode.dev.
+        if let Some(reason) = handle_refusal(&delivery.path, &protected_folders()) {
+            return Err(reason.into());
+        }
+        let live = with_ui(|ui| live_source(&ui.webview)).ok_or("the window is gone")?;
+        // Decided immediately before posting.
+        let after = self.session().delivery_read(delivery.token, &live);
+        if let AfterRead::Retry(more) = after {
+            self.start(more);
+            return Ok(());
+        }
+        let message = json!({
+            "type": "webwrap-file-handle",
+            "token": delivery.token.to_string(),
+            "name": delivery.name,
+        });
+        with_ui(|ui| {
+            let environment = ui.environment.cast()?;
+            let webview = ui.webview.cast()?;
+            vscode::post_handle(&environment, &webview, &delivery.path, &message.to_string())
+        })
+        .ok_or("the window is gone")?
+        .map_err(|error| error.to_string())?;
+        report::log(format_args!("delivered {}", delivery.name));
+        Ok(())
     }
 
     fn delivery_failed(&self, delivery: &Delivery, error: String) {

@@ -10,6 +10,7 @@ mod inspect;
 mod report;
 mod save;
 mod single_instance;
+mod vscode;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use std::sync::mpsc;
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use webwrap_bridge::{resolve, MAX_FILES};
-use webwrap_spec::{nav_verdict, AppSpec, NavEvent};
+use webwrap_spec::{nav_verdict, Adapter, AppSpec, NavEvent};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -168,6 +169,7 @@ fn run(
         .expect("launchUrl was validated as an https URL");
     let title = spec.display_name;
     let trusted_origins = spec.trusted_origins;
+    let adapter = spec.adapter;
 
     // Started before the window exists so a later launch is answered at once;
     // its files wait in the channel until the bridge is ready.
@@ -181,6 +183,9 @@ fn run(
             let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url));
             if let Some(args) = browser_args_from_env() {
                 builder = builder.additional_browser_args(&args);
+            }
+            if adapter == Adapter::VscodeDev {
+                builder = builder.initialization_script(vscode::script(&trusted_origins));
             }
             let window = builder
                 .title(title)
@@ -206,7 +211,7 @@ fn run(
             if let Ok(hwnd) = window.hwnd() {
                 use_main_icon(hwnd);
             }
-            let bridge = match Bridge::install(&window, trusted_origins, files) {
+            let bridge = match Bridge::install(&window, trusted_origins, adapter, files) {
                 Ok(bridge) => bridge,
                 Err(error) => report::abort(
                     &format!("this app's safety checks could not be installed: {error}"),
