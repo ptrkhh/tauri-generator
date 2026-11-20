@@ -152,41 +152,69 @@ const pngBytes = (size) => Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex')
 
 /** Choose `file` in the app's open dialog with UI Automation, as a person would. */
 function pickInDialog(pid, file) {
+  // Windows lists an owned dialog as a top-level window of its process, so
+  // EnumWindows finds it wherever UI Automation's tree places it. The app's
+  // message boxes are dialogs too; the open dialog is the one with a
+  // file-name box (automation id 1148).
   const script = `
     $ErrorActionPreference = 'Stop'
-    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-    $A = [System.Windows.Automation.AutomationElement]
-    $T = [System.Windows.Automation.TreeScope]
-    function Where-Is($property, $value) { [System.Windows.Automation.PropertyCondition]::new($property, $value) }
-    function Both($a, $b) { [System.Windows.Automation.AndCondition]::new($a, $b) }
-    $edit = [System.Windows.Automation.ControlType]::Edit
-    $button = [System.Windows.Automation.ControlType]::Button
-    $fileName = Both (Where-Is $A::AutomationIdProperty '1148') (Where-Is $A::ControlTypeProperty $edit)
-    # UI Automation lists an owned dialog under its owner window, so look
-    # under each of the app's windows. The app's message boxes are dialogs
-    # too; the open dialog is the one with a file-name box.
-    $mine = Where-Is $A::ProcessIdProperty ([int]$env:APP_PID)
-    $isDialog = Where-Is $A::ClassNameProperty '#32770'
-    $deadline = (Get-Date).AddSeconds(30)
-    $dialog = $null
-    do {
-      foreach ($top in $A::RootElement.FindAll($T::Children, $mine)) {
-        $candidates = @($top) + @($top.FindAll($T::Children, $isDialog))
-        foreach ($window in $candidates) {
-          if ($window.Current.ClassName -eq '#32770' -and $window.FindFirst($T::Descendants, $fileName)) { $dialog = $window }
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
+    Add-Type -TypeDefinition @'
+      using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+      public static class TopWindows {
+        delegate bool Visit(IntPtr window, IntPtr data);
+        [DllImport("user32.dll")] static extern bool EnumWindows(Visit visit, IntPtr data);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int size);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+        public static List<IntPtr> Of(uint pid, out string seen) {
+          var found = new List<IntPtr>(); var all = new StringBuilder();
+          EnumWindows((window, data) => {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (owner != pid || !IsWindowVisible(window)) return true;
+            var name = new StringBuilder(256); GetClassName(window, name, 256);
+            var text = new StringBuilder(256); GetWindowText(window, text, 256);
+            all.Append(name + " '" + text + "'; ");
+            if (name.ToString() == "#32770") found.Add(window);
+            return true;
+          }, IntPtr.Zero);
+          seen = all.ToString();
+          return found;
         }
       }
-      if (-not $dialog) { Start-Sleep -Milliseconds 300 }
-    } until ($dialog -or (Get-Date) -gt $deadline)
-    if (-not $dialog) { throw 'no open dialog appeared' }
-    $name = $dialog.FindFirst($T::Descendants, $fileName)
-    $name.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($env:PICK_PATH)
-    $open = $dialog.FindFirst($T::Descendants, (Both (Where-Is $A::AutomationIdProperty '1') (Where-Is $A::ControlTypeProperty $button)))
-    $open.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+'@
+    $A = [System.Windows.Automation.AutomationElement]
+    $T = [System.Windows.Automation.TreeScope]
+    $fileName = [System.Windows.Automation.AndCondition]::new(
+      [System.Windows.Automation.PropertyCondition]::new($A::AutomationIdProperty, '1148'),
+      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit))
+    $open = [System.Windows.Automation.AndCondition]::new(
+      [System.Windows.Automation.PropertyCondition]::new($A::AutomationIdProperty, '1'),
+      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button))
+    $deadline = (Get-Date).AddSeconds(30)
+    $box = $null
+    $seen = ''
+    do {
+      foreach ($window in [TopWindows]::Of([uint32]$env:APP_PID, [ref]$seen)) {
+        $found = $A::FromHandle($window).FindFirst($T::Descendants, $fileName)
+        if ($found) { $box = $found; $dialog = $A::FromHandle($window) }
+      }
+      if (-not $box) { Start-Sleep -Milliseconds 500 }
+    } until ($box -or (Get-Date) -gt $deadline)
+    if (-not $box) {
+      $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+      $shot = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+      [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+      if ($env:RUNNER_TEMP) { $shot.Save((Join-Path $env:RUNNER_TEMP 'open-dialog.png')) }
+      throw "no open dialog with a file-name box; the app's visible windows: $seen"
+    }
+    $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($env:PICK_PATH)
+    $dialog.FindFirst($T::Descendants, $open).GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     'picked'`;
   return execFileSync('powershell', ['-NoProfile', '-Command', script], {
     env: { ...process.env, APP_PID: String(pid), PICK_PATH: file },
-    timeout: 60000,
+    timeout: 90000,
   }).toString();
 }
 

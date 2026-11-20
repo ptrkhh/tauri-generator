@@ -191,4 +191,5 @@ jobs:
             ${{ runner.temp }}/failure.png
             ${{ runner.temp }}/vscode-live.png
             ${{ runner.temp }}/photopea-live.png
+            ${{ runner.temp }}/open-dialog.png
           if-no-files-found: ignore
