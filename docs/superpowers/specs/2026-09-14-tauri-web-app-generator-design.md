@@ -105,7 +105,7 @@ The Windows packager performs a local specialization step:
 3. Replace executable icon resources.
 4. Replace display-name and version resources.
 5. Validate that the resources can be read back.
-6. Atomically publish the final `<slug>.exe`.
+6. Atomically publish the final `<slug>-x64.exe` and `<slug>-arm64.exe`, one per architecture (sub-project C design).
 
 The wrapper reads configuration from its own executable resources. It has no adjacent JSON, icon, or runtime-specific sidecar.
 
@@ -341,7 +341,7 @@ If a site saves by downloading a new file, the runtime may offer to replace the 
 
 ### V1 release gates
 
-1. `twitter.exe` and `twitter.apk` are single-file outputs with embedded configuration and icons.
+1. `twitter-x64.exe`, `twitter-arm64.exe`, and `twitter.apk` are single-file outputs with embedded configuration and icons. (Two Windows files per app, one per architecture: user decision of 2026-11-20, recorded in the sub-project C design.)
 2. Twitter and Facebook APKs install simultaneously and retain isolated state.
 3. Regenerating Twitter updates only Twitter.
 4. On Windows, a generated Photopea app appears in **Open with**, opens a PSD, edits it, and Ctrl+S changes the original file bytes.

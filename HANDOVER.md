@@ -8,7 +8,7 @@ Updated 2026-11-20. The spikes and sub-projects A and B are finished. A fresh Co
 
 ## Product decisions already made
 
-The eventual personal, non-commercial tool is a local `tauri_generator.exe`, not a hosted website or GitHub Actions service. It should accept a website such as `twitter.com` and produce self-contained `twitter.exe` and `twitter.apk` files (no JSON/ICO sidecars). Different canonical URLs coexist; regenerating the same URL updates that app rather than replacing another app. Icon discovery is automatic with an optional gallery override.
+The eventual personal, non-commercial tool is a local `tauri_generator.exe`, not a hosted website or GitHub Actions service. It should accept a website such as `twitter.com` and produce self-contained `twitter-x64.exe`, `twitter-arm64.exe`, and `twitter.apk` files (no JSON/ICO sidecars). Regenerating the same URL updates that app. Since 2026-11-20, a different URL given the same file name overwrites the old app. Files the generator did not make are never overwritten. The generator asks for the output folder every time. Icon discovery is automatic with an optional gallery override.
 
 Windows v1 must support file associations broadly, at minimum Photopea for `.psd` and vscode.dev (or a compatible alternative) for `.md`. Double-clicking a file should launch the matching generated app. Ctrl+S must write changes back to the original local file, and Ctrl+O should continue to work. Custom DNS is an optional generation setting: system DNS is the default; otherwise ask for a complete HTTPS DoH URL, never silently bypass it, and fail closed if it cannot be honored.
 
