@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { attach, sleep, until } from './cdp.mjs';
 import { assert, check, forward, launch, logged, makeFile, outside, required, run, sha256, work } from './apps.mjs';
@@ -73,6 +74,7 @@ const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-
     palette.hidden = true;
     const [handle] = await showOpenFilePicker({ multiple: false });
     __trail.push('picker returned ' + handle?.name);
+    (window.__handles ??= {})[handle.name] = handle;
     await sleep(300);
     const file = await handle.getFile().catch((error) => {
       __trail.push('getFile failed: ' + error);
@@ -319,30 +321,42 @@ async function checkVscodeAdapter() {
   const pageC = await attach(DEBUG_C, HOME_C);
   await pageC.loaded(HOME_C);
 
-  await check('vscodeDev: where a handle can save (recorded)', async () => {
+  await check('vscodeDev: where WebView2 lets a site use a file handle (recorded)', async () => {
     assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
-    const deep = path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`));
-    fs.mkdirSync(deep, { recursive: true });
-    const places = {
-      'temp, inside AppData': makeFile('inside.md', 'inside', work),
-      'outside AppData': onePath,
-      'outside AppData, over 260 characters': makeFile('long.md', 'long', deep),
+    const home = os.homedir();
+    const dirs = {
+      'outside AppData (runner temp)': outside,
+      'Documents': path.join(home, 'Documents'),
+      'home folder itself': home,
+      'LOCALAPPDATA\\Temp': work,
+      'APPDATA (Roaming)': process.env.APPDATA,
+      'ProgramData': process.env.ProgramData,
+      'outside AppData, over 260 characters': path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`)),
     };
-    await forward(APP_C, DEBUG_C, places['temp, inside AppData'], places['outside AppData, over 260 characters']);
-    await opened(pageC, 'long.md');
-    for (const [where, file] of Object.entries(places)) {
-      const outcome = await pageC.evaluate(`(async () => {
-        try {
-          const writable = await __opened.find((f) => f.name === ${JSON.stringify(path.basename(file))}).handle.createWritable();
-          await writable.write('saved');
-          await writable.close();
-          return 'saved';
-        } catch (error) {
-          return String(error);
-        }
-      })()`);
-      const onDisk = fs.readFileSync(file, 'utf8') === 'saved' ? 'file changed' : 'file unchanged';
-      process.stdout.write(`  observed: ${where} (${file.length} characters): ${outcome}; ${onDisk}\n`);
+    const places = Object.entries(dirs).map(([where, dir], i) => {
+      fs.mkdirSync(dir, { recursive: true });
+      return { where, file: makeFile(`place-${i}.md`, 'place', dir) };
+    });
+    try {
+      await forward(APP_C, DEBUG_C, ...places.map((place) => place.file));
+      await until(() => pageC.evaluate(`(window.__handles ?? {})['place-${places.length - 1}.md'] !== undefined`), 'every place handed over', 150000);
+      for (const { where, file } of places) {
+        const outcome = await pageC.evaluate(`(async () => {
+          const handle = __handles[${JSON.stringify(path.basename(file))}];
+          const attempt = async (step) => { try { await step(); return 'ok'; } catch (error) { return error.name; } };
+          const read = await attempt(() => handle.getFile());
+          const write = await attempt(async () => {
+            const writable = await handle.createWritable();
+            await writable.write('saved');
+            await writable.close();
+          });
+          return 'read ' + read + ', write ' + write;
+        })()`);
+        const onDisk = fs.readFileSync(file, 'utf8') === 'saved' ? 'file changed' : 'file unchanged';
+        process.stdout.write(`  observed: ${where} (${file.length} characters): ${outcome}; ${onDisk}\n`);
+      }
+    } finally {
+      for (const { file } of places) fs.rmSync(file, { force: true });
     }
   }, explainStandIn(pageC));
 
@@ -369,14 +383,14 @@ async function checkVscodeAdapter() {
     assert((await opened(pageC, 'three.md')) === 'third file', 'three.md opened with the wrong text');
     await sleep(2000);
     const seen = await pageC.evaluate(`[__opened.map((f) => f.name).join(), editor.value, __keys]`);
-    assert(seen[0] === 'one.md,inside.md,long.md,two.md,three.md', `opened ${seen[0]}`);
+    assert(seen[0].endsWith('two.md,three.md') && seen[0].startsWith('one.md'), `opened ${seen[0]}`);
     assert(seen[1] === '' && seen[2] === 0, `input reached the page: editor "${seen[1]}", ${seen[2]} key events`);
   }, explainStandIn(pageC));
 
   await check('gate 8, vscodeDev: no handle after navigating to an untrusted origin', async () => {
     await pageC.evaluate(`location.href = ${JSON.stringify(AWAY_C + '/')}`);
     await pageC.loaded(AWAY_C);
-    await logged(c, /revoked 5 file tokens/, 'revocation in the log');
+    await logged(c, /revoked \d+ file tokens/, 'revocation in the log');
     await pageC.evaluate(`(() => {
       window.__messages = 0;
       chrome.webview.addEventListener('message', () => __messages++);
