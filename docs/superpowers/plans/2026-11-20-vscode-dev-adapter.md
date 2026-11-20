@@ -2,6 +2,10 @@
 
 Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](../specs/2026-11-20-file-bridge-and-adapters-design.md), section D2. Builds on D1's bridge (plan `2026-11-20-file-bridge-runtime-plumbing.md`). Branch `feat/vscode-adapter`.
 
+## Status
+
+Tasks 1-5 are complete (2026-11-20). The evidence is `docs/evidence/2026-11-20-vscode-dev-adapter.md`. The clarifications below are the deviations from the spec.
+
 ## Goal
 
 An app generated with `--adapter vscodeDev` opens a file it is given, at launch or from a later launch, as a tab in `vscode.dev`. Ctrl+S then changes the original file. This is the save half of gate 5; its "Open with" and double-click half stays with E.
