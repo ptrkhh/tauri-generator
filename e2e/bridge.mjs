@@ -33,7 +33,11 @@ function required(name) {
 
 const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
 <a id=pop href="http://127.0.0.1:9/popup-clicked" target=_blank
-   style="display:block;width:300px;height:120px;background:#ccc">pop-up link</a>`;
+   style="display:block;width:300px;height:120px;background:#ccc">pop-up link</a>
+<script>
+  // A pop-up opened by the page's own script, with no click: B's finding 1.
+  if (location.search === '?autopopup') setTimeout(() => window.open('https://example.com/scripted'), 300);
+</script>`;
 for (const port of [8443, 8444]) {
   https
     .createServer({ pfx: PFX, passphrase: 'webwrap' }, (_, response) => {
@@ -283,8 +287,12 @@ async function main() {
   });
 
   await check('pop-ups: a script pop-up is denied, a clicked link opens externally', async () => {
-    await pageA.evaluate(`window.open('https://example.com/scripted')`);
+    // Driven by the page's own script: code evaluated over DevTools counts as
+    // user-initiated in WebView2, as console pop-ups do in Chrome.
+    await pageA.evaluate(`location.href = ${JSON.stringify(HOME_A + '/?autopopup')}`);
+    await pageA.loaded(HOME_A);
     await logged(a, /popup-denied https:\/\/example\.com\/scripted/, 'denied scripted pop-up');
+    assert(!/popup-external https:\/\/example\.com\/scripted/.test(a.log), 'the scripted pop-up opened externally');
     const point = await pageA.evaluate(`(() => {
       const r = document.getElementById('pop').getBoundingClientRect();
       return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
