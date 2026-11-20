@@ -9,9 +9,19 @@
   if (!bridge) return;
   // Page-to-app messages are JSON text posted as a string.
   const post = (message) => bridge.postMessage(JSON.stringify(message));
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const config = { environment: { customIO: { open: 'app.echoToOE("Open");', save: 'app.echoToOE("Save");' } } };
+  // File > Save reports which document it was pressed on, so a save waiting
+  // behind other work still saves that document, whatever is active by then.
+  const config = {
+    environment: {
+      customIO: {
+        open: 'app.echoToOE("Open");',
+        save:
+          'var d = app.activeDocument;' +
+          'app.echoToOE(JSON.stringify({ webwrap: "save-pressed", source: d ? d.source : null, name: d ? d.name : null }));',
+      },
+    },
+  };
   let frame;
   let status;
   let ready = false;
@@ -28,57 +38,59 @@
   // Photopea handles messages in order and answers each with "done", except
   // a file it cannot read, which gets no answer at all. So the shell never
   // awaits a file's own "done": each script it sends echoes a reply tagged
-  // with a kind, and the "done" after that reply ends the wait. Operations run
-  // one at a time.
+  // with a kind, and the "done" after that reply ends the wait. Anything that
+  // arrives before the echo belongs to an earlier message and is dropped.
+  // Operations run one at a time.
 
   let pending = null;
   let queue = Promise.resolve();
   const serial = (operation) => (queue = queue.then(operation).catch((error) => notice(String(error))));
 
-  /** Send a script that echoes `{webwrap: kind, …}`; collect the replies until
-   * the "done" after that echo, or for up to 5 minutes. */
+  /** Send a script that echoes `{webwrap: kind, …}`; collect the echo and what
+   * follows it until "done", or give up after 5 minutes. */
   const ask = (script, kind) =>
-    Promise.race([
-      new Promise((resolve) => {
-        pending = { kind, seen: false, replies: [], resolve };
-        frame.contentWindow.postMessage(script, PHOTOPEA.origin);
-      }),
-      sleep(300000).then(() => {
-        const replies = pending?.replies ?? [];
-        pending = null;
-        return replies;
-      }),
-    ]);
+    new Promise((resolve) => {
+      const request = {
+        kind,
+        seen: false,
+        replies: [],
+        finish() {
+          clearTimeout(request.timer);
+          if (pending === request) pending = null;
+          resolve(request.replies);
+        },
+      };
+      request.timer = setTimeout(() => request.finish(), 300000);
+      pending = request;
+      frame.contentWindow.postMessage(script, PHOTOPEA.origin);
+    });
   const reply = (replies, kind) => replies.find((item) => item?.webwrap === kind);
 
   addEventListener('message', (event) => {
     if (!frame || event.source !== frame.contentWindow || event.origin !== PHOTOPEA.origin) return;
     const data = event.data;
-    // The user's File > Save and File > Open, through customIO.
-    if (data === 'Save') return void serial(save);
     if (data === 'Open') return void post({ type: 'webwrap-pick-file' });
     if (data === 'done') {
       if (!ready) {
         ready = true;
         post({ type: 'webwrap-ready' });
       } else if (pending?.seen) {
-        const { replies, resolve } = pending;
-        pending = null;
-        resolve(replies);
+        pending.finish();
       }
       return;
     }
-    if (!pending) return;
     const item = typeof data === 'string' && data.startsWith('{"webwrap"') ? JSON.parse(data) : data;
-    if (item?.webwrap === pending.kind) pending.seen = true;
-    pending.replies.push(item);
+    if (item?.webwrap === 'save-pressed') return void serial(() => save(item));
+    if (!pending) return;
+    if (!pending.seen && item?.webwrap === pending.kind) pending.seen = true;
+    if (pending.seen) pending.replies.push(item);
   });
 
   // ---- Opening -----------------------------------------------------------
 
   const FORMATS = { psd: 'psd', png: 'png', jpg: 'jpg:0.95', jpeg: 'jpg:0.95', webp: 'webp' };
   const formatOf = (name) => FORMATS[name.split('.').pop().toLowerCase()] ?? 'psd';
-  /** token -> { name, format } for each document opened from a file. */
+  /** token -> { name, stem, format } for each document opened from a file. */
   const files = new Map();
 
   async function open(token, name, bytes) {
@@ -88,24 +100,27 @@
     );
     if (!before) throw new Error(`Photopea did not answer, so ${name} was not opened`);
     frame.contentWindow.postMessage(bytes, PHOTOPEA.origin, [bytes]);
-    // Runs once Photopea has finished with the file. The document is tagged
-    // only if one was added: if Photopea could not read the file, the active
-    // document is an earlier one, and tagging it would make its Save
-    // overwrite this file.
+    // Runs once Photopea has finished with the file. Photopea appends a file
+    // it opened as the last document, named and sourced "file". Only that
+    // document is tagged: if Photopea could not read the file, or the user
+    // switched tabs or made a document meanwhile, tagging anything else
+    // would make that document's Save overwrite this file.
     const stem = name.replace(/\.[^.]*$/, '') || name;
     const tagged = reply(
       await ask(
-        `if (app.documents.length === ${before.count + 1}) {` +
-          `app.activeDocument.source = ${JSON.stringify(`webwrap:${token}`)};` +
-          `app.activeDocument.name = ${JSON.stringify(stem)};` +
-          'app.echoToOE(JSON.stringify({ webwrap: "tag", opened: true }));' +
+        'var last = app.documents[app.documents.length - 1];' +
+        `if (app.documents.length === ${before.count + 1} && last.source === "file" && last.name === "file") {` +
+          `last.source = ${JSON.stringify(`webwrap:${token}`)};` +
+          `last.name = ${JSON.stringify(stem)};` +
+          'app.echoToOE(JSON.stringify({ webwrap: "tag", opened: true, name: last.name }));' +
         '} else app.echoToOE(JSON.stringify({ webwrap: "tag", opened: false }));',
         'tag',
       ),
       'tag',
     );
     if (tagged?.opened) {
-      files.set(token, { name, format: formatOf(name) });
+      // Photopea may shorten a name it is given, so keep the one it stored.
+      files.set(token, { name, stem: tagged.name, format: formatOf(name) });
       notice(`Opened ${name}`);
     } else {
       post({ type: 'webwrap-open-failed', tokens: [token] });
@@ -120,37 +135,51 @@
 
   /** Hand `bytes` to the app to write to the token's file. */
   const write = (token, bytes) =>
-    Promise.race([
-      new Promise((resolve) => {
-        saves.set(token, { bytes, resolve });
-        post({ type: 'webwrap-save', token, size: bytes.byteLength });
-      }),
-      sleep(600000).then(() => ({ ok: false, error: 'no answer' })),
-    ]).finally(() => saves.delete(token));
+    new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false }), 600000);
+      saves.set(token, {
+        bytes,
+        resolve(result) {
+          clearTimeout(timer);
+          resolve(result);
+        },
+      });
+      post({ type: 'webwrap-save', token, size: bytes.byteLength });
+    }).finally(() => saves.delete(token));
 
-  async function save() {
-    // One Photopea turn reads the active document and exports it, so the
-    // export always belongs to the document that was checked.
-    const bound = Object.fromEntries([...files].map(([token, file]) => [`webwrap:${token}`, file.format]));
+  /** Save the document File > Save was pressed on (`pressed`). */
+  async function save(pressed) {
+    if (!pressed.source || !pressed.name) return notice('Nothing to save');
+    const token = pressed.source?.startsWith('webwrap:') ? pressed.source.slice('webwrap:'.length) : null;
+    const file = token && files.get(token);
+    // A tagged document writes its file only while it still has the name it
+    // was opened with: a copy Photopea made of it, or a renamed one, is not
+    // that file and is downloaded instead.
+    const bound = file && pressed.name === file.stem ? file : null;
+    const label = bound ? bound.name : `${pressed.name}.psd`;
+    notice(`Saving ${label}…`);
+    // Photopea exports only the active document, so the pressed one is made
+    // active first. It must be the only document with that source and name.
     const replies = await ask(
       '(function () {' +
-        `var bound = ${JSON.stringify(bound)};` +
-        'var d = app.activeDocument;' +
-        'if (!d) { app.echoToOE(JSON.stringify({ webwrap: "save", state: "none" })); return; }' +
-        'var format = bound[d.source];' +
-        'app.echoToOE(JSON.stringify({ webwrap: "save", state: format ? "bound" : "unbound", source: d.source, name: d.name }));' +
-        'd.saveToOE(format || "psd");' +
+        `var source = ${JSON.stringify(pressed.source)}, name = ${JSON.stringify(pressed.name)}, found = [];` +
+        'for (var i = 0; i < app.documents.length; i++) {' +
+          'if (app.documents[i].source === source && app.documents[i].name === name) found.push(app.documents[i]);' +
+        '}' +
+        'if (found.length !== 1) { app.echoToOE(JSON.stringify({ webwrap: "save", found: found.length })); return; }' +
+        'app.activeDocument = found[0];' +
+        'app.echoToOE(JSON.stringify({ webwrap: "save", found: 1 }));' +
+        `app.activeDocument.saveToOE(${JSON.stringify(bound ? bound.format : 'psd')});` +
       '})();',
       'save',
     );
     const head = reply(replies, 'save');
     const bytes = replies.find((item) => item instanceof ArrayBuffer);
-    if (!head || !bytes) return notice('Nothing to save');
-    if (head.state === 'unbound') return download(bytes, `${head.name}.psd`);
-    const token = head.source.slice('webwrap:'.length);
-    const name = files.get(token)?.name ?? head.name;
+    if (head?.found > 1) return notice(`Not saved: two documents are named ${pressed.name}`);
+    if (!head?.found || !bytes) return notice(`Not saved: ${label}`);
+    if (!bound) return download(bytes, label);
     const result = await write(token, bytes);
-    notice(result.ok ? `Saved ${name}` : `Not saved: ${name}`);
+    notice(result.ok ? `Saved ${label}` : `Not saved: ${label}`);
   }
 
   /** A document made inside Photopea has no file: download it, as Photopea does in a browser. */

@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { attach, until } from './cdp.mjs';
 import { assert, check, launch, logged, makeFile, required, run, sha256 } from './apps.mjs';
-import { makePsd } from './psd.mjs';
+import { layerCount, makePsd } from './psd.mjs';
 
 const APP = required('WEBWRAP_E2E_APP_PHOTOPEA');
 const SHELL = 'https://tauri.localhost/photopea.html';
@@ -47,10 +47,15 @@ run(async () => {
   await check('Ctrl+S in Photopea writes the edited document back to the original file', async () => {
     // An edit, as a person would make one: a new, empty layer.
     await shell.evaluate(`(document.querySelector('iframe').contentWindow.postMessage('app.activeDocument.artLayers.add();', ${JSON.stringify(PHOTOPEA)}), 1)`);
-    await shell.evaluate(`(document.querySelector('iframe').focus(), 1)`);
+    // Into Photopea's canvas, as a person would before pressing keys; with
+    // the Move tool a click without a drag changes nothing.
+    const { width, height } = await shell.evaluate('({ width: innerWidth, height: innerHeight })');
+    await click(Math.round(width / 2), Math.round(height / 2));
     await press(2, 's', 'KeyS', 83);
-    const savedNotice = async () => (await lastNotice()) === 'Saved live.psd';
-    const byKeys = await until(savedNotice, 'Ctrl+S to save', 120000).then(() => true, () => false);
+    // The shell says "Saving" as soon as Save reaches it, long before a
+    // 150 MB export is written.
+    const started = async () => /^(Saving|Saved) live\.psd/.test(await lastNotice());
+    const byKeys = await until(started, 'Ctrl+S to reach Save', 20000).then(() => true, () => false);
     if (byKeys) {
       process.stdout.write('  observed: Ctrl+S reached Photopea\'s Save\n');
     } else {
@@ -59,12 +64,14 @@ run(async () => {
       await click(19, 15);
       await new Promise((resolve) => setTimeout(resolve, 800));
       await click(42, 215);
-      await until(savedNotice, 'File > Save to save', 300000);
+      await until(started, 'File > Save to reach Save', 20000);
     }
+    await until(async () => (await lastNotice()) === 'Saved live.psd', 'the save to finish', 300000);
     const saved = fs.readFileSync(file);
     assert(saved.subarray(0, 4).toString('latin1') === '8BPS', 'the saved file is not a PSD');
     assert(saved.length >= 150_000_000, `the saved file is only ${saved.length} bytes`);
     assert(sha256(saved) !== sha256(psd), 'the file did not change');
+    assert(layerCount(saved) >= 2, `the added layer is not in the saved file (${layerCount(saved)} layers)`);
     const download = path.join(os.homedir(), 'Downloads', 'live.psd');
     assert(!fs.existsSync(download), `Ctrl+S created a download, ${download}`);
   }, explain);

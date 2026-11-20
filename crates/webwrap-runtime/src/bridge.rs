@@ -103,6 +103,8 @@ pub struct Bridge {
     adapter: Adapter,
     /// The app's file types, for the open dialog.
     associations: Arc<Vec<Assoc>>,
+    /// The open dialog is showing; a second request is refused.
+    picking: Arc<AtomicBool>,
 }
 
 /// What the page is told when a write fails. The reason, which names local
@@ -128,6 +130,7 @@ impl Bridge {
             recheck_scheduled: Arc::new(AtomicBool::new(false)),
             adapter,
             associations: Arc::new(associations),
+            picking: Arc::new(AtomicBool::new(false)),
         };
         let installer = bridge.clone();
         window.with_webview(move |platform| {
@@ -375,9 +378,22 @@ impl Bridge {
                         Refusal::Untrusted
                     ));
                 }
-                // Shown once this event has returned, not from inside it.
+                if self.picking.swap(true, Ordering::SeqCst) {
+                    return report::log("pick-file-refused the open dialog is already showing");
+                }
+                // Shown once this event has returned, not from inside it. On
+                // the main thread, run_on_main_thread would run it right here,
+                // so the request comes from another thread.
                 let bridge = self.clone();
-                let _ = self.window.run_on_main_thread(move || bridge.pick_files());
+                std::thread::spawn(move || {
+                    let (window, picking) = (bridge.window.clone(), bridge.picking.clone());
+                    if window
+                        .run_on_main_thread(move || bridge.pick_files())
+                        .is_err()
+                    {
+                        picking.store(false, Ordering::SeqCst);
+                    }
+                });
             }
         }
     }
@@ -513,8 +529,16 @@ impl Bridge {
     /// Ctrl+O in Photopea: the native open dialog. Chosen files open exactly
     /// like files from a later launch.
     fn pick_files(&self) {
-        let Ok(hwnd) = self.window.hwnd() else { return };
-        let chosen = match photopea::pick_files(hwnd, &self.associations) {
+        report::log("pick-file shown");
+        let chosen = self
+            .window
+            .hwnd()
+            .map_err(|error| {
+                windows::core::Error::new(windows::core::HRESULT(-1), error.to_string())
+            })
+            .and_then(|hwnd| photopea::pick_files(hwnd, &self.associations));
+        self.picking.store(false, Ordering::SeqCst);
+        let chosen = match chosen {
             Ok(chosen) => chosen,
             Err(error) => {
                 report::log(format_args!("pick-file-failed {error}"));
@@ -525,6 +549,11 @@ impl Bridge {
         };
         report::log(format_args!("pick-file {} chosen", chosen.len()));
         let (mut files, mut bad) = (Vec::new(), Vec::new());
+        if chosen.len() > MAX_FILES {
+            bad.push(format!(
+                "Only the first {MAX_FILES} of the chosen files were opened."
+            ));
+        }
         for path in chosen.into_iter().take(MAX_FILES) {
             match resolve(path.as_os_str()) {
                 Ok(path) => files.push(path),

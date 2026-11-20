@@ -21,16 +21,19 @@ const DEBUG_D = 9305;
 
 // Behaves like Photopea where the shell relies on it (checked against live
 // Photopea): "done" when ready and after each message it handles, but nothing
-// for a file it cannot read (here, one starting "BAD!"); a file opens as the
-// new active document named "file"; scripts run against `app`; saveToOE posts
-// the document's bytes; File > Save and Open run the customIO scripts. Its
-// state is reported to this test by POST /state; commands from the test
-// arrive as {__test} messages from the shell's frame.
+// for a file it cannot read (here, one starting "BAD!"); a file opens, a
+// moment later, as the new last and active document named and sourced
+// "file"; scripts run against app; saveToOE posts the bytes of the
+// *active* document, whichever document it is called on; File > Save and Open
+// run the customIO scripts. Its state is reported to this test by POST
+// /state; commands from the test arrive as {__test} messages from the shell's
+// frame.
 const STAND_IN_PAGE = `<!doctype html><meta charset=utf-8><title>photopea stand-in</title><body>stand-in<script>
   const config = JSON.parse(decodeURIComponent(location.hash.slice(1) || '{}'));
   const docs = [];
   let active = -1;
   const formats = [];
+  let switchNextOpenTo = null;
   const send = (message, transfer = []) => parent.postMessage(message, '*', transfer);
   const hex = (buffer) => Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, '0')).join('');
   // Reports go out in order, each a snapshot taken when it was asked for.
@@ -45,23 +48,36 @@ const STAND_IN_PAGE = `<!doctype html><meta charset=utf-8><title>photopea stand-
       await fetch('/state', { method: 'POST', body: JSON.stringify(state) });
     });
   }
-  const wrap = (d) => ({
+  const wrap = (d) => Object.defineProperty({
     get name() { return d.name; }, set name(value) { d.name = value; },
     get source() { return d.source; }, set source(value) { d.source = value; },
-    saveToOE(format) { formats.push(format); const bytes = (d.export ?? d.bytes).slice(0); send(bytes, [bytes]); },
-  });
+    saveToOE(format) {
+      formats.push(format);
+      const exported = docs[active];
+      const bytes = (exported.export ?? exported.bytes).slice(0);
+      send(bytes, [bytes]);
+    },
+  }, '_d', { value: d });
   const app = {
     get documents() { return docs.map(wrap); },
     get activeDocument() { return active < 0 ? null : wrap(docs[active]); },
+    set activeDocument(document) { active = docs.indexOf(document._d); },
     echoToOE: (text) => send(String(text)),
   };
+  // One message at a time, in order, as Photopea handles them.
+  let handling = Promise.resolve();
   addEventListener('message', (event) => {
     if (event.source !== parent) return;
-    const data = event.data;
+    handling = handling.then(() => handle(event.data));
+  });
+  async function handle(data) {
     if (data instanceof ArrayBuffer) {
       if (new TextDecoder().decode(data.slice(0, 4)) === 'BAD!') return void report();
+      await new Promise((resolve) => setTimeout(resolve, 200)); // opening takes a moment
       docs.push({ name: 'file', source: 'file', bytes: data });
       active = docs.length - 1;
+      // As if the user clicked another tab while the file was opening.
+      if (switchNextOpenTo !== null) [active, switchNextOpenTo] = [switchNextOpenTo, null];
       send('done');
     } else if (typeof data === 'string') {
       new Function('app', data)(app);
@@ -76,19 +92,43 @@ const STAND_IN_PAGE = `<!doctype html><meta charset=utf-8><title>photopea stand-
       docs[data.doc].export = new Uint8Array(data.bytes).buffer;
     } else if (data?.__test === 'activate') {
       active = data.doc;
+    } else if (data?.__test === 'switch-next-open') {
+      switchNextOpenTo = data.to;
+    } else if (data?.__test === 'save-then-switch') {
+      // Save is pressed on the active document, then another tab is clicked
+      // before the shell gets to it.
+      new Function('app', config.environment.customIO.save)(app);
+      active = data.to;
+    } else if (data?.__test === 'impersonate') {
+      // Photopea's frame must never reach the app directly.
+      const webview = window.chrome?.webview;
+      if (webview) {
+        for (const type of ['webwrap-ready', 'webwrap-pick-file']) webview.postMessage(JSON.stringify({ type }));
+      }
+      fetch('/impersonated', { method: 'POST', body: String(Boolean(webview)) });
     } else if (data?.__test === 'new') {
-      docs.push({ name: 'Untitled-1', source: '', bytes: new Uint8Array(data.bytes).buffer });
+      docs.push({ name: 'Untitled-1', source: 'local,0,Untitled-1.psd', bytes: new Uint8Array(data.bytes).buffer });
       active = docs.length - 1;
     }
     report();
-  });
+  }
   send('done');
   report();
 </script>`;
 
 let state = null;
+let impersonated = null;
 https
   .createServer({ pfx: PFX, passphrase: 'webwrap' }, (request, response) => {
+    if (request.method === 'POST' && request.url === '/impersonated') {
+      let body = '';
+      request.on('data', (chunk) => (body += chunk));
+      request.on('end', () => {
+        impersonated = body;
+        response.end();
+      });
+      return;
+    }
     if (request.method === 'POST' && request.url === '/state') {
       let body = '';
       request.on('data', (chunk) => (body += chunk));
@@ -113,20 +153,26 @@ const pngBytes = (size) => Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex')
 /** Choose `file` in the app's open dialog with UI Automation, as a person would. */
 function pickInDialog(pid, file) {
   const script = `
+    $ErrorActionPreference = 'Stop'
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     $A = [System.Windows.Automation.AutomationElement]
     $T = [System.Windows.Automation.TreeScope]
     function Where-Is($property, $value) { [System.Windows.Automation.PropertyCondition]::new($property, $value) }
     function Both($a, $b) { [System.Windows.Automation.AndCondition]::new($a, $b) }
+    $edit = [System.Windows.Automation.ControlType]::Edit
+    $button = [System.Windows.Automation.ControlType]::Button
+    $fileName = Both (Where-Is $A::AutomationIdProperty '1148') (Where-Is $A::ControlTypeProperty $edit)
+    # The app's message boxes are dialogs too; the open dialog is the one
+    # with a file-name box.
     $deadline = (Get-Date).AddSeconds(30)
+    $dialog = $null
     do {
-      $dialog = $A::RootElement.FindFirst($T::Children, (Both (Where-Is $A::ProcessIdProperty ([int]$env:APP_PID)) (Where-Is $A::ClassNameProperty '#32770')))
+      $windows = $A::RootElement.FindAll($T::Children, (Both (Where-Is $A::ProcessIdProperty ([int]$env:APP_PID)) (Where-Is $A::ClassNameProperty '#32770')))
+      foreach ($window in $windows) { if ($window.FindFirst($T::Descendants, $fileName)) { $dialog = $window } }
       if (-not $dialog) { Start-Sleep -Milliseconds 300 }
     } until ($dialog -or (Get-Date) -gt $deadline)
     if (-not $dialog) { throw 'no open dialog appeared' }
-    $edit = [System.Windows.Automation.ControlType]::Edit
-    $button = [System.Windows.Automation.ControlType]::Button
-    $name = $dialog.FindFirst($T::Descendants, (Both (Where-Is $A::AutomationIdProperty '1148') (Where-Is $A::ControlTypeProperty $edit)))
+    $name = $dialog.FindFirst($T::Descendants, $fileName)
     $name.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($env:PICK_PATH)
     $open = $dialog.FindFirst($T::Descendants, (Both (Where-Is $A::AutomationIdProperty '1') (Where-Is $A::ControlTypeProperty $button)))
     $open.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -150,8 +196,8 @@ run(async () => {
   const explain = async () => `  stand-in: ${JSON.stringify(state)}\n  shell notice: ${await lastNotice()}\n${shell.problems.slice(-10).join('\n')}`;
 
   await check('photopea: a 160 MiB PSD given at launch reaches Photopea intact, tagged with its file', async () => {
-    await until(() => state?.docs[0]?.sha256 === sha256(big), 'Photopea to hold big.psd', 180000);
-    assert(state.docs[0].source.startsWith('webwrap:') && state.docs[0].name === 'big', `tag: ${JSON.stringify(state.docs[0])}`);
+    await until(() => state?.docs[0]?.sha256 === sha256(big) && state.docs[0].source.startsWith('webwrap:'), 'Photopea to hold big.psd, tagged', 180000);
+    assert(state.docs[0].name === 'big', `name: ${JSON.stringify(state.docs[0])}`);
     await logged(d, /delivered big\.psd/, 'the delivery in the log');
   }, explain);
 
@@ -160,21 +206,35 @@ run(async () => {
     await command({ __test: 'menu', which: 'save' });
     await saved('big.psd');
     assert(sha256(fs.readFileSync(bigPath)) === sha256(flipped(big)), 'big.psd on disk is not the edited document');
-    assert(state.formats.at(-1) === 'psd', `exported as ${state.formats.at(-1)}`);
+    await until(() => state.formats.at(-1) === 'psd', 'the export to be PSD');
     assert(!fs.readdirSync(work).some((name) => name.startsWith('.webwrap-')), 'a temporary file was left behind');
   }, explain);
 
   const png = pngBytes(5000);
   const pngPath = makeFile('image.png', png);
   await check('photopea: a PNG from a second launch is a second document; each saves only its own file', async () => {
+    // As if the user clicked big.psd's tab while image.png was opening.
+    await command({ __test: 'switch-next-open', to: 0 });
     await forward(APP_D, DEBUG_D, pngPath);
-    await until(() => state?.docs[1]?.source.startsWith('webwrap:'), 'image.png to open', 60000);
+    await until(() => state?.docs[1]?.source.startsWith('webwrap:') && state.docs[1].name === 'image', 'image.png to open, tagged', 60000);
+    assert(state.docs[0].source !== state.docs[1].source && state.docs[0].name === 'big', `tags: ${JSON.stringify(state.docs)}`);
+    await command({ __test: 'activate', doc: 1 });
     await command({ __test: 'edit', doc: 1 });
     await command({ __test: 'menu', which: 'save' });
     await saved('image.png');
     assert(sha256(fs.readFileSync(pngPath)) === sha256(flipped(png)), 'image.png on disk is not the edited document');
-    assert(state.formats.at(-1) === 'png', `a PNG was exported as ${state.formats.at(-1)}`);
+    await until(() => state.formats.at(-1) === 'png', 'the PNG to be exported as PNG');
     assert(sha256(fs.readFileSync(bigPath)) === sha256(flipped(big)), 'saving the PNG changed big.psd');
+  }, explain);
+
+  await check('photopea: Save saves the document it was pressed on, even after a tab switch', async () => {
+    const pngBefore = fs.readFileSync(pngPath);
+    await command({ __test: 'activate', doc: 0 });
+    await command({ __test: 'save-then-switch', to: 1 });
+    await saved('big.psd');
+    assert(sha256(fs.readFileSync(bigPath)) === sha256(flipped(big)), 'big.psd is not what its document holds');
+    assert(fs.readFileSync(pngPath).equals(pngBefore), 'image.png was written instead');
+    await command({ __test: 'activate', doc: 1 });
   }, explain);
 
   await check('photopea: bytes in a format the file extension does not name are refused', async () => {
@@ -219,6 +279,15 @@ run(async () => {
     await command({ __test: 'menu', which: 'save' });
     await saved('picked.psd');
     assert(sha256(fs.readFileSync(pickPath)) === sha256(flipped(pick)), 'picked.psd on disk is not the edited document');
+  }, explain);
+
+  await check('photopea: Photopea\'s frame cannot reach the app directly', async () => {
+    const picks = (d.log.match(/pick-file shown/g) ?? []).length;
+    await command({ __test: 'impersonate' });
+    await until(() => impersonated !== null, 'the frame to try');
+    await sleep(3000);
+    process.stdout.write(`  observed: chrome.webview ${impersonated === 'true' ? 'exists' : 'does not exist'} in the frame\n`);
+    assert((d.log.match(/pick-file shown/g) ?? []).length === picks, 'the frame opened the dialog');
   }, explain);
 
   await check('gate 8, photopea: no file access from an untrusted top-level page', async () => {
