@@ -48,10 +48,13 @@ export async function forward(exe, debugPort, ...files) {
   if (code !== 0) throw new Error(`second launch of ${path.basename(exe)} ended with ${code}`);
 }
 
+/** In %TEMP%, which on Windows is inside %LOCALAPPDATA%. */
 export const work = fs.mkdtempSync(path.join(os.tmpdir(), 'webwrap-e2e-'));
+/** Outside %LOCALAPPDATA%: the runner's own temporary folder. */
+export const outside = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP ?? os.tmpdir(), 'webwrap-e2e-'));
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-export function makeFile(name, content) {
-  const file = path.join(work, name);
+export function makeFile(name, content, dir = work) {
+  const file = path.join(dir, name);
   fs.writeFileSync(file, content);
   return file;
 }
@@ -107,7 +110,14 @@ export async function run(main) {
     diagnose();
   } finally {
     for (const child of children) child.kill();
-    fs.rmSync(work, { recursive: true, force: true });
+    for (const dir of [work, outside]) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
+      } catch (error) {
+        // WebView2 processes can outlive a killed app for a moment.
+        process.stdout.write(`  (could not remove ${dir}: ${error.code})\n`);
+      }
+    }
     process.exit(failed ? 1 : 0);
   }
 }

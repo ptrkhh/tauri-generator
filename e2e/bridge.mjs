@@ -12,7 +12,7 @@ import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
 import { attach, sleep, until } from './cdp.mjs';
-import { assert, check, forward, launch, logged, makeFile, required, run, sha256, work } from './apps.mjs';
+import { assert, check, forward, launch, logged, makeFile, outside, required, run, sha256, work } from './apps.mjs';
 
 const APP_A = required('WEBWRAP_E2E_APP_A');
 const APP_B = required('WEBWRAP_E2E_APP_B');
@@ -147,7 +147,9 @@ const count = (app, pattern) => (app.log.match(new RegExp(pattern, 'g')) ?? []).
 
 /** Saving must never leave its temporary, backup, or swap files behind. */
 function noLeftovers() {
-  const left = fs.readdirSync(work).filter((name) => name.startsWith('.webwrap-') || name.endsWith('.crswap'));
+  const left = [work, outside]
+    .flatMap((dir) => fs.readdirSync(dir))
+    .filter((name) => name.startsWith('.webwrap-') || name.endsWith('.crswap'));
   assert(left.length === 0, `left behind: ${left.join(', ')}`);
 }
 
@@ -312,10 +314,37 @@ async function main() {
 
 /** D2: the vscodeDev adapter against the local stand-in. */
 async function checkVscodeAdapter() {
-  const onePath = makeFile('one.md', 'first file');
+  const onePath = makeFile('one.md', 'first file', outside);
   const c = launch(APP_C, DEBUG_C, [onePath]);
   const pageC = await attach(DEBUG_C, HOME_C);
   await pageC.loaded(HOME_C);
+
+  await check('vscodeDev: where a handle can save (recorded)', async () => {
+    assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
+    const deep = path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`));
+    fs.mkdirSync(deep, { recursive: true });
+    const places = {
+      'temp, inside AppData': makeFile('inside.md', 'inside', work),
+      'outside AppData': onePath,
+      'outside AppData, over 260 characters': makeFile('long.md', 'long', deep),
+    };
+    await forward(APP_C, DEBUG_C, places['temp, inside AppData'], places['outside AppData, over 260 characters']);
+    await opened(pageC, 'long.md');
+    for (const [where, file] of Object.entries(places)) {
+      const outcome = await pageC.evaluate(`(async () => {
+        try {
+          const writable = await __opened.find((f) => f.name === ${JSON.stringify(path.basename(file))}).handle.createWritable();
+          await writable.write('saved');
+          await writable.close();
+          return 'saved';
+        } catch (error) {
+          return String(error);
+        }
+      })()`);
+      const onDisk = fs.readFileSync(file, 'utf8') === 'saved' ? 'file changed' : 'file unchanged';
+      process.stdout.write(`  observed: ${where} (${file.length} characters): ${outcome}; ${onDisk}\n`);
+    }
+  }, explainStandIn(pageC));
 
   await check('vscodeDev: a file given at launch opens through Open File and saves through its handle', async () => {
     assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
@@ -335,19 +364,19 @@ async function checkVscodeAdapter() {
   }, explainStandIn(pageC));
 
   await check('vscodeDev: two files from a second launch open one after the other, typing nothing', async () => {
-    await forward(APP_C, DEBUG_C, makeFile('two.md', 'second file'), makeFile('three.md', 'third file'));
+    await forward(APP_C, DEBUG_C, makeFile('two.md', 'second file', outside), makeFile('three.md', 'third file', outside));
     assert((await opened(pageC, 'two.md')) === 'second file', 'two.md opened with the wrong text');
     assert((await opened(pageC, 'three.md')) === 'third file', 'three.md opened with the wrong text');
     await sleep(2000);
     const seen = await pageC.evaluate(`[__opened.map((f) => f.name).join(), editor.value, __keys]`);
-    assert(seen[0] === 'one.md,two.md,three.md', `opened ${seen[0]}`);
+    assert(seen[0] === 'one.md,inside.md,long.md,two.md,three.md', `opened ${seen[0]}`);
     assert(seen[1] === '' && seen[2] === 0, `input reached the page: editor "${seen[1]}", ${seen[2]} key events`);
   }, explainStandIn(pageC));
 
   await check('gate 8, vscodeDev: no handle after navigating to an untrusted origin', async () => {
     await pageC.evaluate(`location.href = ${JSON.stringify(AWAY_C + '/')}`);
     await pageC.loaded(AWAY_C);
-    await logged(c, /revoked 3 file tokens/, 'revocation in the log');
+    await logged(c, /revoked 5 file tokens/, 'revocation in the log');
     await pageC.evaluate(`(() => {
       window.__messages = 0;
       chrome.webview.addEventListener('message', () => __messages++);

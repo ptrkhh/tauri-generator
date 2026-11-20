@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { attach, until } from './cdp.mjs';
-import { assert, check, forward, launch, logged, makeFile, required, run } from './apps.mjs';
+import { assert, check, forward, launch, logged, makeFile, outside, required, run } from './apps.mjs';
 
 const APP = required('WEBWRAP_E2E_APP_VSCODE');
 const HOME = 'https://vscode.dev';
@@ -92,7 +92,8 @@ run(async () => {
   // the file arrives. Launching with a file is covered by the local stand-in.
   const app = launch(APP, DEBUG);
   const page = await attach(DEBUG, HOME);
-  const one = makeFile('live-one.md', 'before\r\n');
+  // Outside %LOCALAPPDATA%, where WebView2 lets a handle save (D2 evidence).
+  const one = makeFile('live-one.md', 'before\r\n', outside);
 
   await check('vscode.dev opens a file from a later launch', async () => {
     await until(() => page.evaluate(`!!document.querySelector('.monaco-workbench')`), 'the workbench', 120000);
@@ -108,7 +109,7 @@ run(async () => {
   }, explain(page));
 
   await check('another launch opens its file in a new vscode.dev tab, and Ctrl+S saves it', async () => {
-    const two = makeFile('live-two.md', 'second\r\n');
+    const two = makeFile('live-two.md', 'second\r\n', outside);
     await forward(APP, DEBUG, two);
     await showing(page, 'live-two.md', 'second');
     const tabs = (await page.evaluate(STATE)).tabs;
