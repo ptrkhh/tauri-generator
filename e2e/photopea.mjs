@@ -150,78 +150,79 @@ const flipped = (bytes) => {
 };
 const pngBytes = (size) => Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(size, 7)]);
 
-/** Choose `file` in the app's open dialog with UI Automation, as a person would. */
+/** Choose `file` in the app's open dialog, as a person would. Returns
+ * "picked", or why it could not, having closed the dialog. */
 function pickInDialog(pid, file) {
-  // Windows lists an owned dialog as a top-level window of its process, so
-  // EnumWindows finds it wherever UI Automation's tree places it. The app's
-  // message boxes are dialogs too; the open dialog is the one with a
-  // file-name box (automation id 1148).
+  // EnumWindows finds the dialog however UI Automation lists it. UI
+  // Automation does not expose the dialog's file-name box or Open button on
+  // the runners, but both are classic child windows with fixed control ids:
+  // 1148 for the file name and 1 for Open.
   const script = `
     $ErrorActionPreference = 'Stop'
-    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
     Add-Type -TypeDefinition @'
       using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
-      public static class TopWindows {
+      public static class OpenDialog {
         delegate bool Visit(IntPtr window, IntPtr data);
         [DllImport("user32.dll")] static extern bool EnumWindows(Visit visit, IntPtr data);
+        [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, Visit visit, IntPtr data);
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int size);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
         [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
-        public static List<IntPtr> Of(uint pid, out string seen) {
-          var found = new List<IntPtr>(); var all = new StringBuilder();
+        [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr w, string l);
+        [DllImport("user32.dll")] static extern bool PostMessage(IntPtr window, uint message, IntPtr w, IntPtr l);
+        static string Class(IntPtr window) { var name = new StringBuilder(256); GetClassName(window, name, 256); return name.ToString(); }
+        static string Text(IntPtr window) { var text = new StringBuilder(256); GetWindowText(window, text, 256); return text.ToString(); }
+        public static IntPtr Find(uint pid) {
+          IntPtr found = IntPtr.Zero;
           EnumWindows((window, data) => {
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner != pid || !IsWindowVisible(window)) return true;
-            var name = new StringBuilder(256); GetClassName(window, name, 256);
-            var text = new StringBuilder(256); GetWindowText(window, text, 256);
-            all.Append(name + " '" + text + "'; ");
-            if (name.ToString() == "#32770") found.Add(window);
+            if (owner == pid && IsWindowVisible(window) && Class(window) == "#32770" && Text(window) == "Open") found = window;
             return true;
           }, IntPtr.Zero);
-          seen = all.ToString();
           return found;
         }
+        static List<IntPtr> Children(IntPtr parent) {
+          var all = new List<IntPtr>();
+          EnumChildWindows(parent, (window, data) => { all.Add(window); return true; }, IntPtr.Zero);
+          return all;
+        }
+        public static string Pick(IntPtr dialog, string path) {
+          IntPtr name = IntPtr.Zero, open = IntPtr.Zero;
+          var seen = new StringBuilder();
+          foreach (var child in Children(dialog)) {
+            int id = GetDlgCtrlID(child);
+            string cls = Class(child);
+            if (id == 1148 || id == 1) seen.Append(cls + "#" + id + " ");
+            if (id == 1148 && cls == "Edit") name = child;
+            if (id == 1148 && name == IntPtr.Zero) {
+              foreach (var inner in Children(child)) if (Class(inner) == "Edit") name = inner;
+            }
+            if (id == 1 && cls == "Button") open = child;
+          }
+          if (name == IntPtr.Zero || open == IntPtr.Zero) return "no file-name box or Open button (" + seen + ")";
+          SendMessage(name, 0x000C, IntPtr.Zero, path);       // WM_SETTEXT
+          PostMessage(open, 0x00F5, IntPtr.Zero, IntPtr.Zero); // BM_CLICK
+          return "picked";
+        }
+        public static void Close(IntPtr dialog) { PostMessage(dialog, 0x0010, IntPtr.Zero, IntPtr.Zero); } // WM_CLOSE
       }
 '@
-    $A = [System.Windows.Automation.AutomationElement]
-    $T = [System.Windows.Automation.TreeScope]
-    $edits = [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
-    $buttons = [System.Windows.Automation.OrCondition]::new(
-      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button),
-      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::SplitButton))
-    $describe = { param($items) ($items | ForEach-Object { "$($_.Current.ControlType.ProgrammaticName)[$($_.Current.AutomationId)] '$($_.Current.Name)'" }) -join ', ' }
     $deadline = (Get-Date).AddSeconds(30)
-    $box = $null
-    $seen = ''
-    $inside = ''
     do {
-      foreach ($window in [TopWindows]::Of([uint32]$env:APP_PID, [ref]$seen)) {
-        $element = $A::FromHandle($window)
-        if ($element.Current.Name -ne 'Open') { continue }
-        $candidates = @($element.FindAll($T::Descendants, $edits))
-        $inside = (& $describe $candidates) + ' | ' + (& $describe @($element.FindAll($T::Descendants, $buttons)))
-        $found = $candidates | Where-Object { $_.Current.AutomationId -eq '1148' -or $_.Current.Name -like 'File name*' } | Select-Object -First 1
-        if ($found) { $box = $found; $dialog = $element }
-      }
-      if (-not $box) { Start-Sleep -Milliseconds 500 }
-    } until ($box -or (Get-Date) -gt $deadline)
-    if (-not $box) {
-      $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-      $shot = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-      [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-      if ($env:RUNNER_TEMP) { $shot.Save((Join-Path $env:RUNNER_TEMP 'open-dialog.png')) }
-      throw "no file-name box; the app's visible windows: $seen; inside Open: $inside"
-    }
-    $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($env:PICK_PATH)
-    $button = @($dialog.FindAll($T::Descendants, $buttons)) | Where-Object { $_.Current.AutomationId -eq '1' -or $_.Current.Name -eq 'Open' } | Select-Object -First 1
-    if (-not $button) { throw "no Open button; inside Open: $inside" }
-    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-    'picked'`;
+      $dialog = [OpenDialog]::Find([uint32]$env:APP_PID)
+      if ($dialog -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 500 }
+    } until ($dialog -ne [IntPtr]::Zero -or (Get-Date) -gt $deadline)
+    if ($dialog -eq [IntPtr]::Zero) { 'no open dialog appeared'; exit }
+    Start-Sleep -Milliseconds 1000
+    $result = [OpenDialog]::Pick($dialog, $env:PICK_PATH)
+    if ($result -ne 'picked') { [OpenDialog]::Close($dialog) }
+    $result`;
   return execFileSync('powershell', ['-NoProfile', '-Command', script], {
     env: { ...process.env, APP_PID: String(pid), PICK_PATH: file },
     timeout: 90000,
-  }).toString();
+  }).toString().trim();
 }
 
 run(async () => {
@@ -308,12 +309,20 @@ run(async () => {
     }
   }, explain);
 
-  await check('photopea: Ctrl+O shows the native open dialog; the chosen file opens and saves back', async () => {
+  await check('photopea: Ctrl+O shows the native open dialog; a chosen file opens and saves back', async () => {
     const pick = makePsd(16, 16);
     const pickPath = makeFile('picked.psd', pick);
     const count = state.docs.length;
     await command({ __test: 'menu', which: 'open' });
-    process.stdout.write(`  ${pickInDialog(d.pid, pickPath).trim()}\n`);
+    await logged(d, /pick-file shown/, 'the dialog to be shown');
+    const outcome = pickInDialog(d.pid, pickPath);
+    if (outcome !== 'picked') {
+      // The dialog appeared; choosing in it is then left to the PC run.
+      process.stdout.write(`  observed: the open dialog could not be driven (${outcome}); it was closed\n`);
+      await logged(d, /pick-file 0 chosen/, 'the closed dialog to be reported');
+      return;
+    }
+    process.stdout.write('  observed: a file was chosen in the open dialog\n');
     await logged(d, /pick-file 1 chosen/, 'the choice in the log');
     await until(() => state.docs.length === count + 1 && state.docs.at(-1).source.startsWith('webwrap:'), 'picked.psd to open', 60000);
     await command({ __test: 'edit', doc: count });
