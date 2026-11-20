@@ -26,8 +26,8 @@ use webview2_com::{
     NavigationStartingEventHandler, WebMessageReceivedEventHandler,
 };
 use webwrap_bridge::{
-    check_file, handle_refused, parse_page_message, protected_folders, AfterRead, Delivery,
-    PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILE_BYTES,
+    check_file, handle_path, handle_refusal, parse_page_message, protected_folders, AfterRead,
+    Delivery, PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
 };
 use webwrap_spec::Adapter;
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
@@ -102,11 +102,6 @@ pub struct Bridge {
     recheck_scheduled: Arc<AtomicBool>,
     adapter: Adapter,
 }
-
-/// Why a `vscodeDev` app does not open a file WebView2 would refuse it.
-const HANDLE_REFUSED: &str = "vscode.dev cannot use files in folders Windows keeps for apps, \
-     such as AppData, or files whose full path is longer than 260 characters. \
-     Copy the file to another folder, such as Documents, and open the copy.";
 
 /// What the page is told when a write fails. The reason, which names local
 /// paths, goes only to the user's message box: a page never learns a path.
@@ -326,22 +321,36 @@ impl Bridge {
                     Err(refusal) => self.refuse_save(&token, refusal),
                 }
             }
-            PageMessage::OpenFailed { token } => {
-                let named = self
-                    .session()
-                    .delivered_name(source, live, &token)
-                    .map(str::to_owned);
+            PageMessage::OpenFailed { tokens } => {
+                if self.adapter != Adapter::VscodeDev {
+                    return report::log("open-failed-refused this app has no vscode.dev adapter");
+                }
+                let named: Result<Vec<String>, Refusal> = {
+                    let session = self.session();
+                    tokens
+                        .iter()
+                        .take(MAX_FILES)
+                        .map(|token| {
+                            session
+                                .delivered_name(source, live, token)
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                };
                 match named {
-                    Ok(name) if self.adapter == Adapter::VscodeDev => {
+                    Ok(names) if !names.is_empty() => {
                         report::log(format_args!(
-                            "open-failed {name}: vscode.dev did not open it"
+                            "open-failed {}: vscode.dev did not open it",
+                            names.join(", ")
                         ));
                         report::error_box_async(format!(
-                            "vscode.dev did not open {name}: its Open File command did not respond.\n\n\
-                             The file is waiting. Choose File > Open File... in vscode.dev to open it."
+                            "vscode.dev did not open these files: its Open File command did not respond.\n\n\
+                             {}\n\n\
+                             They are waiting. Choose File > Open File... in vscode.dev to open them.",
+                            names.join("\n")
                         ));
                     }
-                    Ok(_) => report::log("open-failed-refused this app has no vscode.dev adapter"),
+                    Ok(_) => report::log("open-failed-refused no file was named"),
                     Err(refusal) => {
                         report::log(format_args!("open-failed-refused {refusal}; {source}"))
                     }
@@ -452,8 +461,8 @@ impl Bridge {
     /// The `vscodeDev` delivery: a read-write handle instead of the bytes.
     fn post_handle(&self, delivery: &Delivery) -> Result<(), String> {
         // Told now, rather than by a security error inside vscode.dev.
-        if handle_refused(&delivery.path, &protected_folders()) {
-            return Err(HANDLE_REFUSED.into());
+        if let Some(reason) = handle_refusal(&delivery.path, &protected_folders()) {
+            return Err(reason.into());
         }
         let live = with_ui(|ui| live_source(&ui.webview)).ok_or("the window is gone")?;
         // Decided immediately before posting.
@@ -470,7 +479,8 @@ impl Bridge {
         with_ui(|ui| {
             let environment = ui.environment.cast()?;
             let webview = ui.webview.cast()?;
-            vscode::post_handle(&environment, &webview, &delivery.path, &message.to_string())
+            let path = handle_path(&delivery.path);
+            vscode::post_handle(&environment, &webview, &path, &message.to_string())
         })
         .ok_or("the window is gone")?
         .map_err(|error| error.to_string())?;

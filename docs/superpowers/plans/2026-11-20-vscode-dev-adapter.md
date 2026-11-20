@@ -37,21 +37,26 @@ Read from the live workbench bundle (`workbench.web.main.internal.js`, build `8a
    - The spec followed the spike, which drove the command with DevTools key events and `Input.insertText`. Those go to whatever has focus when they arrive. The first review found that vscode.dev moving focus into an editor between the runtime's check and its keys would type "Open File..." into the user's file, which a later Ctrl+S saves.
    - Constructed events dispatched on a checked element cannot do that: they have no default action, so nothing is ever typed.
    - Doing it in the page also removes the runtime's DevTools chain, its command state, and keys reaching a focused cross-origin frame.
-2. **One file at a time.** The script keeps a queue. It runs Open File for the oldest file, answers vscode.dev's picker call with that file's handle, and waits for the file's tab before starting the next.
+2. **One file at a time.**
+   - The script keeps a queue and runs Open File for the oldest file.
+   - Only the picker call that follows the run's own click gets the handle.
+   - The next run starts once that file's tab is active and its editor has focus.
+   - If vscode.dev moves focus mid-run (the palette closes), the run starts again within its 30 s. That is safe because nothing can be typed.
 3. **The adapter script reads the app's trusted origins from the spec** instead of hard-coding `https://vscode.dev`. This lets CI run the same script against a local stand-in (Task 4). The runtime still enforces origins natively; the script's check only keeps it from altering other sites.
 4. **Handles reuse D1's token model.**
    - A handle is posted only through `Session::ready`, then `Session::delivery_read`, exactly like a shared buffer. So gate 8 and the pending-navigation hold apply unchanged.
    - There is no shared buffer and no `webwrap-save*` message for this adapter. Saving is vscode.dev's own `createWritable()` on the handle, which WebView2 carries out.
    - Chromium writes a `.crswap` file next to the original and moves it over the original on `close()`. Task 4 asserts that no swap file is left. Whether the original keeps its creation time is WebView2's behaviour, not the runtime's, so Task 4 records it rather than asserting it.
 5. **If the command cannot run, the user is told once.**
-   - The script tries Ctrl+Shift+P for up to 30 s, because early on vscode.dev may not handle keys yet.
-   - It then posts `webwrap-open-failed`. The runtime shows a message box naming the file, saying that vscode.dev's own File > Open File... will open it.
-   - The file stays queued in the page, so that command does open it. Nothing retries automatically.
+   - The script keeps trying for up to 30 s, because early on vscode.dev may not handle keys yet.
+   - It then posts `webwrap-open-failed` with every waiting token. The runtime shows one message box naming those files, saying that vscode.dev's own File > Open File... opens them.
+   - That command takes the oldest waiting file, and the rest follow automatically. Another file arriving also restarts the queue.
 6. **Files WebView2 would refuse a site are refused up front.**
    - Measured in CI (run 44771559248, both architectures). A handle WebView2 creates is refused by its own security check, for reading or writing, inside `%LOCALAPPDATA%` (including `%TEMP%`), `%APPDATA%`, and `%ProgramData%`, and for paths over 260 characters. Documents, the home folder, and other folders work.
    - So the runtime refuses those files with a message box, saying to copy the file to Documents. Otherwise vscode.dev would show a cryptic security error.
    - It also refuses Program Files and Windows, which Chromium blocks too. Those were not measured.
-   - `webwrap_bridge::handle_refused` does the check; `protected_folders` reads the folders from the environment.
+   - `webwrap_bridge::handle_refusal` does the check, with a reason for each case. `protected_folders` reads the folders from the environment.
+   - Length is counted without the `\\?\` prefix. Canonical paths keep that prefix on every network share (`\\?\UNC\…`), so `handle_path` gives WebView2 the plain `\\server\share\…` form. CI measures a share through the runner's administrative share.
 7. **Ctrl+O needs no code.** With nothing queued, the script passes `showOpenFilePicker` through to WebView2's native picker. The hands-on PC run checks that it saves back. CI cannot drive the Windows dialog reliably.
 8. **The live test runs on every push and weekly.**
    - A separate CI step runs it, so a vscode.dev outage reads as that step failing, not the bridge.
@@ -64,7 +69,7 @@ These extend D1's table and keep its rules.
 | Direction | Message | Meaning |
 | --- | --- | --- |
 | host → page | message `{"type":"webwrap-file-handle","token","name"}` with one `FileSystemFileHandle` in `additionalObjects` | One opened file, read-write. Only for the `vscodeDev` adapter. |
-| page → host | `{"type":"webwrap-open-failed","token"}` | vscode.dev did not open this delivered file. Honoured only for the `vscodeDev` adapter, from a trusted page, for a token delivered to it; the runtime shows a message box naming the file. |
+| page → host | `{"type":"webwrap-open-failed","tokens":[…]}` | vscode.dev did not open these delivered files. Honoured only for the `vscodeDev` adapter, from a trusted page, when every token was delivered to it; the runtime shows one message box naming the files. |
 
 ## Task 1: `webwrap-bridge` session additions
 

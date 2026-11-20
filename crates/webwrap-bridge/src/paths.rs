@@ -85,17 +85,39 @@ const PROTECTED_FOLDER_VARIABLES: [&str; 7] = [
     "SystemRoot",
 ];
 
-/// Whether WebView2 refuses a site's file handle for `path`: inside one of
-/// the `protected` folders, or long enough to need the `\\?\` prefix. Both
-/// were measured in CI (D2 evidence). Case is ignored, as Windows does.
-pub fn handle_refused(path: &Path, protected: &[PathBuf]) -> bool {
+/// Why WebView2 would refuse a site's file handle for `path`, if it would:
+/// inside one of the `protected` folders, or a path of 260 characters or
+/// more. Both were measured in CI (D2 evidence). Case is ignored, as Windows
+/// does.
+pub fn handle_refusal(path: &Path, protected: &[PathBuf]) -> Option<&'static str> {
+    let plain = handle_path(path);
+    if plain.to_string_lossy().encode_utf16().count() >= 260 {
+        return Some(
+            "vscode.dev cannot use files whose full path is 260 characters or longer. \
+             Copy the file to a folder with a shorter path, such as Documents, and open the copy.",
+        );
+    }
     let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
-    let path = lower(path);
-    path.to_string_lossy().starts_with(r"\\?\")
-        || protected
-            .iter()
-            .filter(|root| root.is_absolute())
-            .any(|root| path.starts_with(lower(root)))
+    let plain = lower(&plain);
+    protected
+        .iter()
+        .filter(|root| root.is_absolute())
+        .any(|root| plain.starts_with(lower(root)))
+        .then_some(
+            "vscode.dev cannot use files in folders Windows keeps for apps, such as AppData. \
+             Copy the file to another folder, such as Documents, and open the copy.",
+        )
+}
+
+/// `path` as WebView2 should get it. Canonical paths keep the `\\?\` prefix
+/// on every network share, short or not, and on long local paths.
+pub fn handle_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
+        (Some(share), _) => PathBuf::from(format!(r"\\{share}")),
+        (None, Some(local)) => PathBuf::from(local),
+        (None, None) => path.to_path_buf(),
+    }
 }
 
 #[cfg(test)]
@@ -167,19 +189,40 @@ mod tests {
     }
 
     #[test]
-    fn handles_are_refused_inside_protected_folders_and_for_verbatim_paths() {
+    fn handles_are_refused_inside_protected_folders_and_for_long_paths() {
         let base = std::env::temp_dir();
         let protected = [
             base.join("Users/Me/AppData/Local"),
             PathBuf::from("relative"),
         ];
-        let refused = |path: PathBuf| handle_refused(&path, &protected);
-        assert!(refused(base.join("Users/Me/AppData/Local/Temp/a.md")));
-        assert!(refused(base.join("users/me/appdata/LOCAL/a.md")));
-        assert!(refused(PathBuf::from(r"\\?\C:\long\a.md")));
-        assert!(!refused(base.join("Users/Me/Documents/a.md")));
+        let refused = |path: PathBuf| handle_refusal(&path, &protected);
+        assert!(refused(base.join("Users/Me/AppData/Local/Temp/a.md")).is_some());
+        assert!(refused(base.join("users/me/appdata/LOCAL/a.md")).is_some());
+        assert!(refused(base.join("Users/Me/Documents/a.md")).is_none());
         // Whole folder names only, and a relative entry protects nothing.
-        assert!(!refused(base.join("Users/Me/AppData/LocalCopy/a.md")));
-        assert!(!refused(base.join("relative/a.md")));
+        assert!(refused(base.join("Users/Me/AppData/LocalCopy/a.md")).is_none());
+        assert!(refused(base.join("relative/a.md")).is_none());
+        // Length counts without the prefix, so a short share is fine.
+        let long = format!(r"\\?\C:\{}\a.md", "x".repeat(260));
+        assert!(refused(PathBuf::from(long)).unwrap().contains("260"));
+        assert!(refused(PathBuf::from(r"\\?\UNC\server\share\a.md")).is_none());
+        let long_share = format!(r"\\?\UNC\server\share\{}\a.md", "x".repeat(250));
+        assert!(refused(PathBuf::from(long_share)).is_some());
+    }
+
+    #[test]
+    fn webview2_gets_shares_and_short_paths_without_the_verbatim_prefix() {
+        assert_eq!(
+            handle_path(Path::new(r"\\?\UNC\server\share\a.md")),
+            PathBuf::from(r"\\server\share\a.md")
+        );
+        assert_eq!(
+            handle_path(Path::new(r"\\?\C:\a.md")),
+            PathBuf::from(r"C:\a.md")
+        );
+        assert_eq!(
+            handle_path(Path::new(r"C:\a.md")),
+            PathBuf::from(r"C:\a.md")
+        );
     }
 }

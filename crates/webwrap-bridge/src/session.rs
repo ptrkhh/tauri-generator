@@ -34,10 +34,10 @@ pub enum PageMessage {
     /// can never fill in for a different save of the same file.
     #[serde(rename = "webwrap-save-commit")]
     SaveCommit { token: String, save: u64 },
-    /// The `vscodeDev` adapter could not get vscode.dev to open a delivered
-    /// file. The app tells the user.
+    /// The `vscodeDev` adapter could not get vscode.dev to open these
+    /// delivered files. The app tells the user.
     #[serde(rename = "webwrap-open-failed")]
-    OpenFailed { token: String },
+    OpenFailed { tokens: Vec<String> },
 }
 
 /// Parse the JSON text a page posted as a string with
@@ -460,8 +460,10 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_page_message(r#"{"type":"webwrap-open-failed","token":"3"}"#),
-            Some(PageMessage::OpenFailed { token: "3".into() })
+            parse_page_message(r#"{"type":"webwrap-open-failed","tokens":["3","4"]}"#),
+            Some(PageMessage::OpenFailed {
+                tokens: vec!["3".into(), "4".into()]
+            })
         );
         for other in [
             r#"{"type":"site-message"}"#,

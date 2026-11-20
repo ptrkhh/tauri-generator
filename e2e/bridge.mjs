@@ -39,14 +39,16 @@ const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
 
 // A stand-in for vscode.dev, matching it where the vscodeDev adapter relies on
 // it (checked against live vscode.dev): a Ctrl+Shift+P keydown, even a
-// constructed one, opens a command palette; its input filters to a
-// highlighted entry; clicking "File: Open File..." asks showOpenFilePicker
-// for one file, then a little later opens it in a tab and focuses the editor.
+// constructed one, opens a command palette that closes when it loses focus;
+// its input filters to a highlighted entry, a little later; clicking "File:
+// Open File..." asks showOpenFilePicker for one file, adds a tab, and later
+// makes it the active tab and focuses its editor. Like vscode.dev while it
+// restores editors, it takes focus once, during the first palette.
 // `?nopalette` ignores Ctrl+Shift+P.
 const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-in</title>
 <div class=monaco-workbench>
   <div id=tabs></div>
-  <textarea id=editor></textarea>
+  <div class=monaco-editor><textarea id=editor></textarea></div>
   <input id=palette hidden aria-activedescendant=entry><div id=entry role=option></div>
 </div>
 <script>
@@ -54,6 +56,7 @@ const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-
   window.__keys = 0; // trusted key events: what a person, or DevTools, sends
   window.__trail = []; // what happened, for a failure report
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let stealFocus = true;
   addEventListener('keydown', (event) => {
     if (event.isTrusted) __keys++;
     __trail.push(\`keydown \${event.key} ctrl=\${event.ctrlKey} shift=\${event.shiftKey} trusted=\${event.isTrusted}\`);
@@ -62,29 +65,37 @@ const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-
       palette.value = '>';
       entry.textContent = '';
       palette.focus();
+      if (stealFocus) {
+        stealFocus = false;
+        setTimeout(() => { __trail.push('focus stolen'); editor.focus(); }, 100);
+      }
     }
   }, true);
+  palette.addEventListener('blur', () => { palette.hidden = true; });
   palette.addEventListener('input', () => {
     __trail.push('input ' + palette.value);
-    entry.textContent = palette.value === '>Open File...' ? 'File: Open File...Ctrl+O' : '';
+    setTimeout(() => {
+      entry.textContent = palette.value === '>Open File...' ? 'File: Open File...Ctrl+O' : '';
+    }, 300);
   });
   entry.addEventListener('click', async () => {
     __trail.push('click ' + entry.textContent);
-    if (!entry.textContent) return;
+    if (!entry.textContent || palette.hidden) return;
     palette.hidden = true;
     const [handle] = await showOpenFilePicker({ multiple: false });
     __trail.push('picker returned ' + handle?.name);
-    (window.__handles ??= {})[handle.name] = handle;
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.innerHTML = '<span class=label-name></span>';
+    tab.firstChild.textContent = handle.name;
+    tabs.append(tab);
     await sleep(300);
     const file = await handle.getFile().catch((error) => {
       __trail.push('getFile failed: ' + error);
       throw error;
     });
     __opened.push({ name: file.name, text: await file.text(), handle });
-    const tab = document.createElement('div');
-    tab.className = 'tab';
-    tab.textContent = file.name;
-    tabs.append(tab);
+    for (const other of tabs.children) other.classList.toggle('active', other === tab);
     editor.focus();
   });
 </script>`;
@@ -333,6 +344,11 @@ async function checkVscodeAdapter() {
       'over 260 characters': path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`)),
     };
     const allowed = { 'Documents': path.join(home, 'Documents'), 'home folder': home };
+    // A network share, as mapped drives and redirected folders are: the
+    // runner's own administrative share, if it has one.
+    const share = `\\\\localhost\\${outside[0]}$${outside.slice(2)}`;
+    if (fs.existsSync(share)) allowed['network share'] = share;
+    else process.stdout.write(`  (no administrative share at ${share}; the share case is skipped)\n`);
     const place = ([where, dir], i, prefix) => {
       fs.mkdirSync(dir, { recursive: true });
       return { where, file: makeFile(`${prefix}-${i}.md`, `${prefix} ${i}`, dir) };
@@ -355,6 +371,7 @@ async function checkVscodeAdapter() {
           return true;
         })()`);
         assert(fs.readFileSync(file, 'utf8') === 'saved', `${where}: not saved`);
+        assert(!fs.existsSync(`${file}.crswap`), `${where}: the swap file was left behind`);
       }
       const names = await pageC.evaluate('__opened.map((f) => f.name).join()');
       assert(!/refused/.test(names), `a refused file reached the page: ${names}`);
@@ -366,6 +383,8 @@ async function checkVscodeAdapter() {
   await check('vscodeDev: a file given at launch opens through Open File and saves through its handle', async () => {
     assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
     await logged(c, /delivered one\.md/, 'the handle delivery in the log');
+    const trail = await pageC.evaluate('__trail');
+    assert(trail.includes('focus stolen'), 'the stand-in never took focus mid-run, so the restart went untested');
     const created = fs.statSync(onePath).birthtimeMs;
     await pageC.evaluate(`(async () => {
       const writable = await __opened.find((f) => f.name === 'one.md').handle.createWritable();
@@ -386,7 +405,7 @@ async function checkVscodeAdapter() {
     assert((await opened(pageC, 'three.md')) === 'third file', 'three.md opened with the wrong text');
     await sleep(2000);
     const seen = await pageC.evaluate(`[__opened.map((f) => f.name).join(), editor.value, __keys]`);
-    assert(seen[0] === 'one.md,allowed-0.md,allowed-1.md,two.md,three.md', `opened ${seen[0]}`);
+    assert(/^one\.md,(allowed-\d\.md,)+two\.md,three\.md$/.test(seen[0]), `opened ${seen[0]}`);
     assert(seen[1] === '' && seen[2] === 0, `input reached the page: editor "${seen[1]}", ${seen[2]} key events`);
   }, explainStandIn(pageC));
 

@@ -14,25 +14,6 @@ const APP = required('WEBWRAP_E2E_APP_VSCODE');
 const HOME = 'https://vscode.dev';
 const DEBUG = 9304;
 
-/** Wraps the adapter's picker answer to record what vscode.dev got. Test only. */
-const RECORD_PICKER = `(() => {
-  window.__trail = [];
-  const adapter = window.showOpenFilePicker;
-  window.showOpenFilePicker = async (...args) => {
-    __trail.push('picker called ' + JSON.stringify(args));
-    try {
-      const handles = await adapter(...args);
-      __trail.push('picker returned ' + handles.map((h) => h.name));
-      handles[0].getFile().then((f) => __trail.push('getFile ok ' + f.size), (e) => __trail.push('getFile failed ' + e));
-      return handles;
-    } catch (error) {
-      __trail.push('picker threw ' + error);
-      throw error;
-    }
-  };
-  return true;
-})()`;
-
 /** The open tabs, and the lines of the editor in front. Read-only. */
 const STATE = `(() => ({
   tabs: [...document.querySelectorAll('.tab')].map((tab) => tab.textContent),
@@ -77,7 +58,6 @@ const explain = (page) => async () => {
   }
   const state = await page.evaluate(`({
     ...${STATE},
-    trail: window.__trail,
     active: document.activeElement?.tagName + '.' + document.activeElement?.className,
     palette: document.querySelector('.quick-input-widget')?.style.display,
     paletteValue: document.querySelector('.quick-input-box input')?.value,
@@ -88,18 +68,12 @@ const explain = (page) => async () => {
 };
 
 run(async () => {
-  // Launched without a file, so the test can record the picker call before
-  // the file arrives. Launching with a file is covered by the local stand-in.
-  const app = launch(APP, DEBUG);
-  const page = await attach(DEBUG, HOME);
   // Outside %LOCALAPPDATA%, where WebView2 lets a handle save (D2 evidence).
   const one = makeFile('live-one.md', 'before\r\n', outside);
+  const app = launch(APP, DEBUG, [one]);
+  const page = await attach(DEBUG, HOME);
 
-  await check('vscode.dev opens a file from a later launch', async () => {
-    await until(() => page.evaluate(`!!document.querySelector('.monaco-workbench')`), 'the workbench', 120000);
-    await page.evaluate(RECORD_PICKER);
-    await logged(app, /page-ready/, 'the adapter announcing itself');
-    await forward(APP, DEBUG, one);
+  await check('vscode.dev opens a file given at launch', async () => {
     await logged(app, /delivered live-one\.md/, 'the handle delivery in the log');
     await showing(page, 'live-one.md', 'before');
   }, explain(page));
@@ -108,13 +82,17 @@ run(async () => {
     await editAndSave(page, one, 'after');
   }, explain(page));
 
-  await check('another launch opens its file in a new vscode.dev tab, and Ctrl+S saves it', async () => {
+  await check('two files from one later launch open in two new tabs, and Ctrl+S saves', async () => {
     const two = makeFile('live-two.md', 'second\r\n', outside);
-    await forward(APP, DEBUG, two);
-    await showing(page, 'live-two.md', 'second');
+    const three = makeFile('live-three.md', 'third\r\n', outside);
+    await forward(APP, DEBUG, two, three);
+    await showing(page, 'live-three.md', 'third');
     const tabs = (await page.evaluate(STATE)).tabs;
-    assert(tabs.some((tab) => tab.includes('live-one.md')), `the first tab is gone: ${tabs}`);
-    await editAndSave(page, two, 'changed');
-    assert(fs.readFileSync(one, 'utf8') === 'after\r\n', 'the first file changed too');
+    for (const name of ['live-one.md', 'live-two.md']) {
+      assert(tabs.some((tab) => tab.includes(name)), `no tab for ${name}: ${tabs}`);
+    }
+    await editAndSave(page, three, 'changed');
+    assert(fs.readFileSync(one, 'utf8') === 'after\r\n', 'live-one.md changed too');
+    assert(fs.readFileSync(two, 'utf8') === 'second\r\n', 'live-two.md changed too');
   }, explain(page));
 });

@@ -22,19 +22,33 @@
 
   /** Files handed over and not yet taken by vscode.dev, oldest first. */
   const queue = [];
-  let pickerCalled;
+  /** From a run's click until vscode.dev's picker call takes the file. */
+  let expecting = null;
+  let running = false;
 
-  // While files are queued, vscode.dev's picker call gets the next one; with
-  // none, the user's own Ctrl+O reaches WebView2's native picker.
+  const take = (file) => {
+    queue.splice(queue.indexOf(file), 1);
+    return [file.handle];
+  };
+
+  // vscode.dev's picker call gets the file a run is opening. With no run, the
+  // user's own Ctrl+O reaches WebView2's native picker, unless files are left
+  // waiting after a failed run: then it opens the oldest, and the rest follow.
   const nativePicker = window.showOpenFilePicker?.bind(window);
   window.showOpenFilePicker = async (...args) => {
-    if (queue.length === 0) {
-      if (nativePicker) return nativePicker(...args);
-      throw new DOMException('No file was chosen', 'AbortError');
+    if (expecting) {
+      const { file, resolve } = expecting;
+      expecting = null;
+      resolve();
+      return take(file);
     }
-    const file = queue.shift();
-    pickerCalled?.(file);
-    return [file.handle];
+    if (!running && queue.length > 0) {
+      const handles = take(queue[0]);
+      if (queue.length > 0) setTimeout(openQueued, 0);
+      return handles;
+    }
+    if (nativePicker) return nativePicker(...args);
+    throw new DOMException('No file was chosen', 'AbortError');
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,8 +79,7 @@
 
   /** Ctrl+Shift+P until the command palette has focus: early on, vscode.dev
    * may not handle keys yet. */
-  async function openPalette() {
-    const deadline = performance.now() + 30000;
+  async function openPalette(deadline) {
     while (performance.now() < deadline) {
       press(document.activeElement ?? document.body, 'P', 'KeyP', 80, { ctrlKey: true, shiftKey: true });
       const palette = await waitFor(focusedPalette, 2000);
@@ -90,44 +103,61 @@
     }
   };
 
-  /** Run "Open File..." once; true once vscode.dev took `file`. */
+  /** The active tab, if it shows `name` and its editor has focus. */
+  const showing = (name, before) => {
+    const tab = document.querySelector('.tab.active');
+    const label = (tab?.querySelector('.label-name') ?? tab)?.textContent.trim();
+    return tab !== before && label === name && !!document.activeElement?.closest('.monaco-editor');
+  };
+
+  /** Run "Open File..." until vscode.dev takes `file`, for up to 30 s. A run
+   * that vscode.dev interrupts by moving focus, as it does while it starts,
+   * starts again: nothing it does can type into a document. */
   async function runOpenFile(file) {
-    const asked = new Promise((resolve) => (pickerCalled = resolve));
-    const palette = await openPalette();
-    if (!palette) return false;
-    palette.value = '>Open File...';
-    palette.dispatchEvent(new Event('input', { bubbles: true }));
-    const entry = await waitFor(() => document.activeElement === palette && openFileEntry(palette), 5000);
-    if (!entry) {
-      press(palette, 'Escape', 'Escape', 27);
-      return false;
+    const deadline = performance.now() + 30000;
+    while (performance.now() < deadline) {
+      const palette = await openPalette(deadline);
+      if (!palette) return false;
+      palette.value = '>Open File...';
+      palette.dispatchEvent(new Event('input', { bubbles: true }));
+      const entry = await waitFor(
+        () => (document.activeElement === palette ? openFileEntry(palette) : 'closed'),
+        5000,
+      );
+      if (!(entry instanceof Element)) {
+        if (document.activeElement === palette) press(palette, 'Escape', 'Escape', 27);
+        continue;
+      }
+      const before = document.querySelector('.tab.active');
+      const taken = new Promise((resolve) => (expecting = { file, resolve }));
+      click(entry);
+      if (!(await Promise.race([taken.then(() => true), sleep(10000)]))) {
+        expecting = null;
+        return false;
+      }
+      // Let vscode.dev show this file and focus its editor before the next
+      // run opens the palette.
+      await waitFor(() => showing(file.name, before), 10000);
+      return true;
     }
-    click(entry);
-    const taken = await Promise.race([asked, sleep(10000)]);
-    pickerCalled = undefined;
-    if (taken !== file) return false;
-    // Let vscode.dev open and focus this file before the next run.
-    await waitFor(
-      () => [...document.querySelectorAll('.tab')].some((tab) => tab.textContent.includes(file.name)),
-      10000,
-    );
-    return true;
+    return false;
   }
 
-  let running = false;
   async function openQueued() {
     if (running) return;
     running = true;
-    while (queue.length > 0) {
-      const file = queue[0];
-      if (!(await runOpenFile(file))) {
-        // Not retried. The file stays queued, so vscode.dev's own
-        // File > Open File... opens it.
-        post({ type: 'webwrap-open-failed', token: file.token });
-        break;
+    try {
+      while (queue.length > 0) {
+        if (!(await runOpenFile(queue[0]))) {
+          // Left waiting until the user opens one with File > Open File...,
+          // or another file arrives.
+          post({ type: 'webwrap-open-failed', tokens: queue.map((file) => file.token) });
+          break;
+        }
       }
+    } finally {
+      running = false;
     }
-    running = false;
   }
 
   bridge.addEventListener('message', (event) => {
