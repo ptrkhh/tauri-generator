@@ -30,8 +30,9 @@ pub enum PageMessage {
     SaveCommit { token: String, save: u64 },
 }
 
-/// Parse the JSON a page posted with `chrome.webview.postMessage`. Anything
-/// else a site posts is not addressed to the bridge and yields `None`.
+/// Parse the JSON text a page posted as a string with
+/// `chrome.webview.postMessage(JSON.stringify(message))`. Anything else a site
+/// posts is not addressed to the bridge and yields `None`.
 pub fn parse_page_message(json: &str) -> Option<PageMessage> {
     if json.len() > MAX_PAGE_MESSAGE_BYTES {
         return None;

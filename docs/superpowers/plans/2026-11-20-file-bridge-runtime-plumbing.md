@@ -31,7 +31,7 @@ These are decided here; the evidence will list them as deviations.
 
 ## The page protocol
 
-This is the contract D2-D4 build on. Messages go through `chrome.webview`. Every host-to-page message is sent only after checking that the live top-level `Source` is a trusted origin. Every page-to-host message is ignored unless both its own `Source` and the live `Source` are trusted.
+This is the contract D2-D4 build on. Messages go through `chrome.webview`. Page-to-host messages are JSON text posted **as a string** (`chrome.webview.postMessage(JSON.stringify(m))`): wry's own handler runs first and fails on any non-string message, and CI saw object messages never reach the bridge. Host-to-page messages are JSON objects. Every host-to-page message is sent only after checking that the live top-level `Source` is a trusted origin. Every page-to-host message is ignored unless both its own `Source` and the live `Source` are trusted.
 
 | Direction | Message | Meaning |
 | --- | --- | --- |

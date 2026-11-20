@@ -226,9 +226,14 @@ impl Bridge {
                     let (Some(sender), Some(args)) = (sender, args) else {
                         return Ok(());
                     };
-                    let mut json = PWSTR::null();
-                    args.WebMessageAsJson(&mut json)?;
-                    let Some(message) = parse_page_message(&take_pwstr(json)) else {
+                    // Bridge messages are JSON text posted as a string. wry's
+                    // own handler, which runs first, fails on anything else,
+                    // and CI saw object messages never arrive here.
+                    let mut text = PWSTR::null();
+                    if args.TryGetWebMessageAsString(&mut text).is_err() {
+                        return Ok(());
+                    }
+                    let Some(message) = parse_page_message(&take_pwstr(text)) else {
                         return Ok(());
                     };
                     let mut source = PWSTR::null();
@@ -278,7 +283,13 @@ impl Bridge {
             PageMessage::Ready => {
                 let ready = self.session().ready(source, live);
                 match ready {
-                    Ok(deliveries) => self.start(deliveries),
+                    Ok(deliveries) => {
+                        report::log(format_args!(
+                            "page-ready {} queued; {source}",
+                            deliveries.len()
+                        ));
+                        self.start(deliveries)
+                    }
                     Err(refusal) => {
                         report::log(format_args!("delivery-refused {refusal}; {source}"))
                     }
@@ -365,8 +376,9 @@ impl Bridge {
                     &info,
                 );
                 close_buffer(delivery.token);
-                if let Err(error) = posted {
-                    self.delivery_failed(&delivery, error);
+                match posted {
+                    Ok(()) => report::log(format_args!("delivered {}", delivery.name)),
+                    Err(error) => self.delivery_failed(&delivery, error),
                 }
             }
             AfterRead::Retry(more) => {

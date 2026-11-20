@@ -47,6 +47,8 @@ for (const port of [8443, 8444]) {
 const RECEIVER = `(() => {
   if (window.__ww) return;
   const ww = window.__ww = { files: [], results: [], pending: {} };
+  // Page-to-app messages are JSON text posted as a string.
+  const post = (message) => chrome.webview.postMessage(JSON.stringify(message));
   const hex = async (view) => Array.from(
     new Uint8Array(await crypto.subtle.digest('SHA-256', view.slice())),
     (b) => b.toString(16).padStart(2, '0')).join('');
@@ -58,7 +60,7 @@ const RECEIVER = `(() => {
       ww.files.push({ token: info.token, name: info.name, size: info.size, sha256 });
     } else if (info.type === 'webwrap-save-buffer') {
       new Uint8Array(buffer).set(ww.pending[info.token]);
-      chrome.webview.postMessage({ type: 'webwrap-save-commit', token: info.token, save: info.save });
+      post({ type: 'webwrap-save-commit', token: info.token, save: info.save });
     }
     chrome.webview.releaseBuffer(buffer);
   });
@@ -71,9 +73,9 @@ const RECEIVER = `(() => {
       for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31 + 7) & 255;
     }
     ww.pending[token] = bytes;
-    chrome.webview.postMessage({ type: 'webwrap-save', token, size: bytes.length });
+    post({ type: 'webwrap-save', token, size: bytes.length });
   };
-  ww.ready = () => chrome.webview.postMessage({ type: 'webwrap-ready' });
+  ww.ready = () => post({ type: 'webwrap-ready' });
 })()`;
 
 const children = [];
