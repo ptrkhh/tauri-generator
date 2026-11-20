@@ -34,6 +34,10 @@ pub enum PageMessage {
     /// can never fill in for a different save of the same file.
     #[serde(rename = "webwrap-save-commit")]
     SaveCommit { token: String, save: u64 },
+    /// The `vscodeDev` adapter script holds a handle: run vscode.dev's Open
+    /// File command once so that it asks for it.
+    #[serde(rename = "webwrap-vscode-open")]
+    VscodeOpen,
 }
 
 /// Parse the JSON text a page posted as a string with
@@ -81,6 +85,7 @@ pub enum Refusal {
     Size,
     InFlight,
     NotAwaiting,
+    NotReady,
 }
 
 impl fmt::Display for Refusal {
@@ -91,6 +96,7 @@ impl fmt::Display for Refusal {
             Self::Size => "the file must be between 1 byte and 4 GiB",
             Self::InFlight => "a save of this file is already in progress",
             Self::NotAwaiting => "no save of this file is waiting for its bytes",
+            Self::NotReady => "the page has not said it is ready",
         })
     }
 }
@@ -189,6 +195,30 @@ impl Session {
         } else {
             Err(Refusal::Untrusted)
         }
+    }
+
+    /// The current top-level document. Work started for one document checks
+    /// this before every step, so it never continues into the next.
+    pub fn document(&self) -> u64 {
+        self.generation
+    }
+
+    /// A ready, trusted document asks the app to drive one of its commands.
+    /// Returns the document the command may be driven into.
+    pub fn open_command(&self, source: &str, live: &str) -> Result<u64, Refusal> {
+        self.check_sources(source, live)?;
+        if !self.ready {
+            return Err(Refusal::NotReady);
+        }
+        if self.leaving_pending() {
+            return Err(Refusal::Untrusted);
+        }
+        Ok(self.generation)
+    }
+
+    /// Whether a command started for `document` may take its next step.
+    pub fn may_drive(&self, document: u64, live: &str) -> bool {
+        document == self.generation && self.may_post(live)
     }
 
     /// Queue a file the user opened. Returns deliveries to start now.
@@ -441,6 +471,10 @@ mod tests {
                 save: 9
             })
         );
+        assert_eq!(
+            parse_page_message(r#"{"type":"webwrap-vscode-open"}"#),
+            Some(PageMessage::VscodeOpen)
+        );
         for other in [
             r#"{"type":"site-message"}"#,
             r#""webwrap-ready""#,
@@ -580,6 +614,27 @@ mod tests {
         // A trusted navigation never holds anything back.
         s.navigation_starting(8, "https://app.test/next");
         assert!(s.may_post(HOME));
+    }
+
+    #[test]
+    fn a_command_is_driven_only_into_the_ready_trusted_document_that_asked() {
+        let mut s = session();
+        assert_eq!(s.open_command(HOME, HOME), Err(Refusal::NotReady));
+        s.ready(HOME, HOME).unwrap();
+        assert_eq!(s.open_command(AWAY, HOME), Err(Refusal::Untrusted));
+        assert_eq!(s.open_command(HOME, AWAY), Err(Refusal::Untrusted));
+        let document = s.open_command(HOME, HOME).unwrap();
+        assert!(s.may_drive(document, HOME));
+        // Leaving for an untrusted origin stops it before the document changes.
+        s.navigation_starting(7, AWAY);
+        assert!(!s.may_drive(document, HOME));
+        assert_eq!(s.open_command(HOME, HOME), Err(Refusal::Untrusted));
+        s.navigation_completed(7, HOME);
+        assert!(s.may_drive(document, HOME));
+        // A new document, even a trusted one, holds none of the old one's handles.
+        s.document_changed(8, HOME);
+        assert!(!s.may_drive(document, HOME));
+        assert_eq!(s.open_command(HOME, HOME), Err(Refusal::NotReady));
     }
 
     #[test]

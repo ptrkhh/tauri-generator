@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -29,8 +30,10 @@ use webwrap_bridge::{
     check_file, parse_page_message, AfterRead, Delivery, PageMessage, Refusal, Session,
     LEAVING_TIMEOUT, MAX_FILE_BYTES,
 };
+use webwrap_spec::Adapter;
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
 
+use crate::vscode::{self, Outcome};
 use crate::{report, save};
 
 /// The UI thread's WebView2 objects and the shared buffers in use, by token.
@@ -98,6 +101,16 @@ pub struct Bridge {
     writing: Arc<AtomicUsize>,
     close_when_written: Arc<AtomicBool>,
     recheck_scheduled: Arc<AtomicBool>,
+    adapter: Adapter,
+    commands: Arc<Mutex<Commands>>,
+}
+
+/// The `vscodeDev` Open File command runs once at a time. A request that
+/// arrives meanwhile is remembered, with the document that asked, and run next.
+#[derive(Default)]
+struct Commands {
+    running: bool,
+    next: Option<u64>,
 }
 
 /// What the page is told when a write fails. The reason, which names local
@@ -111,6 +124,7 @@ impl Bridge {
     pub fn install(
         window: &WebviewWindow,
         trusted_origins: Vec<String>,
+        adapter: Adapter,
         files: Vec<PathBuf>,
     ) -> tauri::Result<Self> {
         let bridge = Bridge {
@@ -119,6 +133,8 @@ impl Bridge {
             writing: Arc::new(AtomicUsize::new(0)),
             close_when_written: Arc::new(AtomicBool::new(false)),
             recheck_scheduled: Arc::new(AtomicBool::new(false)),
+            adapter,
+            commands: Arc::default(),
         };
         let installer = bridge.clone();
         window.with_webview(move |platform| {
@@ -316,6 +332,16 @@ impl Bridge {
                     Err(refusal) => self.refuse_save(&token, refusal),
                 }
             }
+            PageMessage::VscodeOpen => {
+                if self.adapter != Adapter::VscodeDev {
+                    return report::log("open-refused this app has no vscode.dev adapter");
+                }
+                let asked = self.session().open_command(source, live);
+                match asked {
+                    Ok(document) => self.open_command(document),
+                    Err(refusal) => report::log(format_args!("open-refused {refusal}; {source}")),
+                }
+            }
         }
     }
 
@@ -323,7 +349,11 @@ impl Bridge {
 
     fn start(&self, deliveries: Vec<Delivery>) {
         for delivery in deliveries {
-            if let Err(error) = self.begin_read(&delivery) {
+            let started = match self.adapter {
+                Adapter::VscodeDev => self.post_handle(&delivery),
+                _ => self.begin_read(&delivery),
+            };
+            if let Err(error) = started {
                 self.delivery_failed(&delivery, error);
             }
         }
@@ -411,6 +441,86 @@ impl Bridge {
                 close_buffer(delivery.token);
                 self.start(more);
             }
+        }
+    }
+
+    /// The `vscodeDev` delivery: a read-write handle instead of the bytes.
+    fn post_handle(&self, delivery: &Delivery) -> Result<(), String> {
+        let live = with_ui(|ui| live_source(&ui.webview)).ok_or("the window is gone")?;
+        // Decided immediately before posting.
+        let after = self.session().delivery_read(delivery.token, &live);
+        if let AfterRead::Retry(more) = after {
+            self.start(more);
+            return Ok(());
+        }
+        let message = json!({
+            "type": "webwrap-file-handle",
+            "token": delivery.token.to_string(),
+            "name": delivery.name,
+        });
+        with_ui(|ui| {
+            let environment = ui.environment.cast()?;
+            let webview = ui.webview.cast()?;
+            vscode::post_handle(&environment, &webview, &delivery.path, &message.to_string())
+        })
+        .ok_or("the window is gone")?
+        .map_err(|error| error.to_string())?;
+        report::log(format_args!("delivered {}", delivery.name));
+        Ok(())
+    }
+
+    // ---- The vscode.dev Open File command ---------------------------------
+
+    fn open_command(&self, document: u64) {
+        {
+            let mut commands = self.commands.lock().unwrap_or_else(|p| p.into_inner());
+            if commands.running {
+                commands.next = Some(document);
+                return;
+            }
+            commands.running = true;
+        }
+        let Some(webview) = with_ui(|ui| ui.webview.clone()) else {
+            return;
+        };
+        let bridge = self.clone();
+        let may_continue = move || {
+            with_ui(|ui| live_source(&ui.webview))
+                .is_some_and(|live| bridge.session().may_drive(document, &live))
+        };
+        let bridge = self.clone();
+        vscode::run_open_command(webview, Rc::new(may_continue), move |outcome| {
+            bridge.open_command_ended(document, outcome)
+        });
+    }
+
+    fn open_command_ended(&self, document: u64, outcome: Outcome) {
+        let next = {
+            let mut commands = self.commands.lock().unwrap_or_else(|p| p.into_inner());
+            commands.running = false;
+            commands.next.take()
+        };
+        let next = match outcome {
+            Outcome::Done => {
+                report::log("vscode-open done");
+                next
+            }
+            Outcome::PageChanged => {
+                report::log("vscode-open stopped: the page changed");
+                next
+            }
+            Outcome::Failed(reason) => {
+                report::log(format_args!("vscode-open-failed {reason}"));
+                report::error_box_async(format!(
+                    "vscode.dev did not open a file given to this app: {reason}.\n\n\
+                     The file is waiting. Choose File > Open File... in vscode.dev to open it."
+                ));
+                // Not retried: that could type into the page again and again.
+                next.filter(|&asked| asked != document)
+            }
+        };
+        if let Some(asked) = next.filter(|&asked| asked == self.session().document()) {
+            self.open_command(asked);
         }
     }
 
