@@ -416,7 +416,7 @@ async function checkVscodeAdapter() {
     await pageC.evaluate(`(() => {
       window.__messages = 0;
       chrome.webview.addEventListener('message', () => __messages++);
-      for (const message of [{ type: 'webwrap-ready' }, { type: 'webwrap-open-failed', token: '1' }]) {
+      for (const message of [{ type: 'webwrap-ready' }, { type: 'webwrap-open-failed', tokens: ['1'] }]) {
         chrome.webview.postMessage(JSON.stringify(message));
       }
     })()`);
