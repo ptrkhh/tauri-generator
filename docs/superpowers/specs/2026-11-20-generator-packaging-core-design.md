@@ -1,6 +1,6 @@
 # Generator Packaging Core Design (sub-project C)
 
-Date: 2026-11-20. Status: decisions agreed with the user; awaiting their review before the plan is written.
+Date: 2026-11-20. Status: implemented on `feat/generator-packaging-core`. Deviations and the running-app finding are in `docs/evidence/2026-11-20-generator-packaging-core.md`.
 
 ## Summary
 
@@ -116,7 +116,7 @@ The version-string limitation the spike recorded, where only `strings[0]` is upd
 | A generated app with the same `appId` | Replace it. Gate 3: regenerating Twitter updates Twitter |
 | A generated app with a different `appId` | Replace it, per the user's decision. The old app's storage folder stays in `%LOCALAPPDATA%\WebWrap\<oldId>`; nothing deletes it |
 | Anything else: not a PE, a PE without `WEBWRAP_APP_SPEC`, a directory | Refuse. Name the file. Write nothing, including the other architecture's file |
-| An app that is currently running (Windows) | Not yet known whether Windows lets the rename replace a running `.exe`. `MoveFileExW` is expected to be refused, but the POSIX-semantics fallback above might succeed. The plan's first Windows task probes this in CI and pins the observed behaviour with a test. Either way: no partial file, and a refusal names the app to close |
+| An app that is currently running (Windows) | Refused before anything is published: `PackError::InUse`, naming the app to close. CI showed Windows denies the rename (os error 5), even through the POSIX-semantics fallback; see the evidence. |
 
 The result reports, per file, whether it was new, replaced the same app, or replaced a different app. That lets F show what happened without asking first.
 
@@ -130,7 +130,7 @@ The result reports, per file, whether it was new, replaced the same app, or repl
 
 ```
 webwrap-generate generate --url <text> --name <display name> --icon <png> --out <folder>
-                          [--slug <slug>] [--adapter none|photopea|vscode]
+                          [--slug <slug>] [--adapter none|photopea|vscodeDev]
                           [--assoc <.ext> <mime> <description>]...
                           [--template-x64 <exe> --template-arm64 <exe>]
 webwrap-generate inspect --input <exe>

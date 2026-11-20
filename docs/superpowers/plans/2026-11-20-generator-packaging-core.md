@@ -4,7 +4,7 @@ Spec: [`docs/superpowers/specs/2026-11-20-generator-packaging-core-design.md`](.
 
 ## Status
 
-Tasks 1-6 are pending. Each is committed on its own and pushed, and CI must be green before the next push that depends on Windows.
+Tasks 1-6 are complete (2026-11-20). Review fixes landed in `5427379`. The evidence is `docs/evidence/2026-11-20-generator-packaging-core.md`; it lists every deviation from the task descriptions below.
 
 ## Global constraints
 
