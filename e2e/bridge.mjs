@@ -1,35 +1,32 @@
-// End-to-end checks of the D1 file bridge against real generated apps on
-// real WebView2. Run by .github/workflows/windows.yml; needs:
+// End-to-end checks of the file bridge against real generated apps on real
+// WebView2. Run by .github/workflows/windows.yml; needs:
 //   WEBWRAP_E2E_APP_A  generated app for https://localhost:8443/
 //   WEBWRAP_E2E_APP_B  generated app for https://localhost:8444/
+//   WEBWRAP_E2E_APP_C  generated app for https://localhost:8445/, --adapter vscodeDev
 //   WEBWRAP_E2E_PFX    certificate for localhost, password "webwrap"
-// The apps' stderr carries one `webwrap: <event>` line per native decision,
-// which is how the native side is observed without test hooks.
 
-import { spawn, execFileSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { attach, sleep, until } from './cdp.mjs';
+import { assert, check, forward, launch, logged, makeFile, required, run, sha256, work } from './apps.mjs';
 
 const APP_A = required('WEBWRAP_E2E_APP_A');
 const APP_B = required('WEBWRAP_E2E_APP_B');
+const APP_C = required('WEBWRAP_E2E_APP_C');
 const PFX = fs.readFileSync(required('WEBWRAP_E2E_PFX'));
 const HOME_A = 'https://localhost:8443';
 const HOME_B = 'https://localhost:8444';
+const HOME_C = 'https://localhost:8445';
 const AWAY_A = 'https://127.0.0.1:8443'; // same server, different origin
+const AWAY_C = 'https://127.0.0.1:8445';
 const DEBUG_A = 9301;
 const DEBUG_B = 9302;
+const DEBUG_C = 9303;
 const MiB = 1024 * 1024;
-
-function required(name) {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is not set`);
-  return value;
-}
 
 const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
 <a id=pop href="http://127.0.0.1:9/popup-clicked" target=_blank
@@ -38,11 +35,48 @@ const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
   // A pop-up opened by the page's own script, with no click: B's finding 1.
   if (location.search === '?autopopup') setTimeout(() => window.open('https://example.com/scripted'), 300);
 </script>`;
-for (const port of [8443, 8444]) {
+
+// A stand-in for vscode.dev, enough for the vscodeDev adapter: Ctrl+Shift+P
+// opens a command palette whose selected entry echoes what is typed, and
+// Enter on "Open File..." asks showOpenFilePicker for one file, as
+// vscode.dev's pickFileAndOpen does. `?nopalette` has no palette at all.
+const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-in</title>
+<div class=monaco-workbench>
+  <input id=palette hidden aria-activedescendant=pick><div id=pick role=option></div>
+</div>
+<script>
+  window.__opened = [];
+  window.__keys = 0;
+  const palette = document.getElementById('palette');
+  const pick = document.getElementById('pick');
+  addEventListener('keydown', (event) => {
+    __keys++;
+    if (location.search !== '?nopalette' && event.ctrlKey && event.shiftKey && event.code === 'KeyP') {
+      event.preventDefault();
+      palette.hidden = false;
+      palette.value = '>';
+      pick.textContent = '';
+      palette.focus();
+    } else if (event.key === 'Enter' && document.activeElement === palette) {
+      const command = pick.textContent;
+      palette.hidden = true;
+      palette.blur();
+      if (command === 'Open File...') openFile();
+    }
+  }, true);
+  palette.addEventListener('input', () => { pick.textContent = palette.value.slice(1); });
+  async function openFile() {
+    const [handle] = await showOpenFilePicker({ multiple: false });
+    const file = await handle.getFile();
+    __opened.push({ name: file.name, text: await file.text(), handle });
+  }
+</script>`;
+
+for (const [port, page] of [[8443, PAGE], [8444, PAGE], [8445, VSCODE_STAND_IN]]) {
   https
     .createServer({ pfx: PFX, passphrase: 'webwrap' }, (_, response) => {
       response.writeHead(200, { 'content-type': 'text/html' });
-      response.end(PAGE);
+      response.end(page);
     })
     .listen(port);
 }
@@ -82,82 +116,19 @@ const RECEIVER = `(() => {
   ww.ready = () => post({ type: 'webwrap-ready' });
 })()`;
 
-const children = [];
-function launch(exe, debugPort, args = []) {
-  const child = spawn(exe, args, {
-    env: {
-      ...process.env,
-      // Test only: a debugging port to drive the page, and acceptance of the
-      // test server's self-signed certificate.
-      WEBWRAP_TEST_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort} --ignore-certificate-errors`,
-    },
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  child.log = '';
-  let partial = '';
-  child.stderr.on('data', (chunk) => {
-    child.log += chunk;
-    // Print whole lines only, so two apps' output never interleaves mid-line.
-    const lines = (partial + chunk).split('\n');
-    partial = lines.pop();
-    for (const line of lines) process.stdout.write(`  [${path.basename(exe)} ${child.pid}] ${line}\n`);
-  });
-  child.exitCode$ = new Promise((resolve) => child.on('exit', resolve));
-  child.on('exit', (code) => process.stdout.write(`  [${path.basename(exe)} ${child.pid}] exited ${code}\n`));
-  children.push(child);
-  return child;
-}
-
-const work = fs.mkdtempSync(path.join(os.tmpdir(), 'webwrap-e2e-'));
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-function makeFile(name, content) {
-  const file = path.join(work, name);
-  fs.writeFileSync(file, content);
-  return file;
-}
-
-/** Launch an app again with a file; it must hand it over and exit 0. */
-async function forward(exe, debugPort, file) {
-  const second = launch(exe, debugPort, file ? [file] : []);
-  const code = await Promise.race([second.exitCode$, sleep(20000).then(() => 'timeout')]);
-  if (code !== 0) throw new Error(`second launch of ${path.basename(exe)} ended with ${code}`);
-}
-
 const received = (page, name) =>
   until(() => page.evaluate(`window.__ww?.files.find((f) => f.name === ${JSON.stringify(name)})`), `${name} to arrive`);
 const result = (page, token) =>
   until(() => page.evaluate(`window.__ww?.results.find((r) => r.token === ${JSON.stringify(token)})`), `save result for ${token}`);
-const logged = (app, pattern, what) => until(() => pattern.test(app.log), what);
+/** The text of a file the vscode stand-in opened. */
+const opened = (page, name) =>
+  until(() => page.evaluate(`window.__opened?.find((f) => f.name === ${JSON.stringify(name)})?.text`), `${name} to open`);
+const count = (app, pattern) => (app.log.match(new RegExp(pattern, 'g')) ?? []).length;
 
-async function check(name, body) {
-  process.stdout.write(`- ${name}\n`);
-  await body();
-  process.stdout.write(`  PASS ${name}\n`);
-}
-
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
-}
-
-/** Saving must never leave its temporary or backup files behind. */
+/** Saving must never leave its temporary, backup, or swap files behind. */
 function noLeftovers() {
-  const left = fs.readdirSync(work).filter((name) => name.startsWith('.webwrap-'));
+  const left = fs.readdirSync(work).filter((name) => name.startsWith('.webwrap-') || name.endsWith('.crswap'));
   assert(left.length === 0, `left behind: ${left.join(', ')}`);
-}
-
-/** What a failure report needs: which apps still run, and WebView2's flags. */
-function diagnose() {
-  for (const child of children) {
-    process.stdout.write(`  app ${child.pid}: exit ${child.exitCode ?? 'still running'}\n`);
-  }
-  try {
-    const script = "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | " +
-      "Where-Object { $_.CommandLine -notmatch '--type=' } | Select-Object ProcessId, CommandLine | Format-List | Out-String -Width 4000";
-    process.stdout.write(execFileSync('powershell', ['-NoProfile', '-Command', script]).toString());
-    process.stdout.write(execFileSync('netstat', ['-ano']).toString().split('\n').filter((l) => /:930[12]\b/.test(l)).join('\n') + '\n');
-  } catch (error) {
-    process.stdout.write(`  (diagnostics failed: ${error.message})\n`);
-  }
 }
 
 async function main() {
@@ -315,18 +286,73 @@ async function main() {
     await sleep(1000);
     assert((await pageA.evaluate('location.origin')) === HOME_A, 'the page navigated away');
   });
+
+  await checkVscodeAdapter();
 }
 
-let failed = false;
-try {
-  await main();
-  process.stdout.write('ALL PASS\n');
-} catch (error) {
-  failed = true;
-  process.stdout.write(`FAIL: ${error.stack}\n`);
-  diagnose();
-} finally {
-  for (const child of children) child.kill();
-  fs.rmSync(work, { recursive: true, force: true });
-  process.exit(failed ? 1 : 0);
+/** D2: the vscodeDev adapter against the local stand-in. */
+async function checkVscodeAdapter() {
+  const onePath = makeFile('one.md', 'first file');
+  const c = launch(APP_C, DEBUG_C, [onePath]);
+  const pageC = await attach(DEBUG_C, HOME_C);
+  await pageC.loaded(HOME_C);
+
+  await check('vscodeDev: a file given at launch opens through Open File and saves through its handle', async () => {
+    assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
+    await logged(c, /vscode-open done/, 'a finished Open File command');
+    const created = fs.statSync(onePath).birthtimeMs;
+    await pageC.evaluate(`(async () => {
+      const writable = await __opened.find((f) => f.name === 'one.md').handle.createWritable();
+      await writable.write('saved through the handle');
+      await writable.close();
+      return true;
+    })()`);
+    assert(fs.readFileSync(onePath, 'utf8') === 'saved through the handle', 'one.md not changed');
+    noLeftovers();
+    // Recorded, not asserted: WebView2, not the runtime, performs this write.
+    const kept = fs.statSync(onePath).birthtimeMs === created;
+    process.stdout.write(`  observed: a handle save ${kept ? 'keeps' : 'does not keep'} the creation time\n`);
+  });
+
+  await check('vscodeDev: two files from a second launch open one after the other', async () => {
+    await forward(APP_C, DEBUG_C, makeFile('two.md', 'second file'), makeFile('three.md', 'third file'));
+    assert((await opened(pageC, 'two.md')) === 'second file', 'two.md opened with the wrong text');
+    assert((await opened(pageC, 'three.md')) === 'third file', 'three.md opened with the wrong text');
+    const names = await pageC.evaluate('__opened.map((f) => f.name)');
+    assert(names.join() === 'one.md,two.md,three.md', `opened ${names}`);
+    await until(() => count(c, 'vscode-open done') === 3, 'one Open File command per file');
+  });
+
+  await check('gate 8, vscodeDev: no handle and no keys after navigating to an untrusted origin', async () => {
+    await pageC.evaluate(`location.href = ${JSON.stringify(AWAY_C + '/')}`);
+    await pageC.loaded(AWAY_C);
+    await logged(c, /revoked 3 file tokens/, 'revocation in the log');
+    await pageC.evaluate(`(() => {
+      window.__messages = 0;
+      chrome.webview.addEventListener('message', () => __messages++);
+      for (const type of ['webwrap-ready', 'webwrap-vscode-open']) chrome.webview.postMessage(JSON.stringify({ type }));
+    })()`);
+    await logged(c, /delivery-refused the page is not on a trusted origin/, 'refused readiness');
+    await logged(c, /open-refused the page is not on a trusted origin/, 'refused Open File command');
+    await forward(APP_C, DEBUG_C, makeFile('while-away.md', 'opened after returning'));
+    await sleep(3000);
+    const seen = await pageC.evaluate('[__messages, __keys, __opened.length]');
+    assert(seen.join() === '0,0,0', `the untrusted page got messages, keys, files: ${seen}`);
+
+    await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/')}`);
+    await pageC.loaded(HOME_C);
+    assert((await opened(pageC, 'while-away.md')) === 'opened after returning', 'while-away.md text');
+  });
+
+  await check('vscodeDev: an Open File command that cannot run fails once, without retrying', async () => {
+    await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/?nopalette')}`);
+    await pageC.loaded(HOME_C);
+    await forward(APP_C, DEBUG_C, makeFile('no-palette.md', 'never opened'));
+    await logged(c, /vscode-open-failed the command palette did not open/, 'the failure in the log');
+    await sleep(7000); // longer than one run's 5 s wait
+    assert(count(c, 'vscode-open-failed') === 1, 'the failed command was retried');
+    assert((await pageC.evaluate('__keys')) === 1, 'more keys than one Ctrl+Shift+P reached the page');
+  });
 }
+
+run(main);

@@ -33,7 +33,7 @@ That leaves the spike's route: hand the page a real handle, and run the Open Fil
 3. **Handles reuse D1's token model.**
    - A handle is posted only through `Session::ready`, then `Session::delivery_read`, exactly like a shared buffer. So gate 8 and the pending-navigation hold apply unchanged.
    - There is no shared buffer and no `webwrap-save*` message for this adapter. Saving is vscode.dev's own `createWritable()` on the handle, which WebView2 carries out.
-   - Chromium writes a `.crswap` file next to the original and swaps it in with `ReplaceFileW` (`base::ReplaceFile`). So the original keeps its creation time, like D1's own save. Task 4 asserts both points, the creation time and the swap file being gone, rather than trusting them.
+   - Chromium writes a `.crswap` file next to the original and moves it over the original on `close()`. Task 4 asserts that no swap file is left. Whether the original keeps its creation time is WebView2's behaviour, not the runtime's, so Task 4 records it rather than asserting it.
 4. **The Open File command is driven only into the document that asked.**
    - Before each DevTools step, the runtime checks two things: the live document is still the one the request came from (`Session::document`), and it may still be posted to.
    - Otherwise it stops. The check is the spike's, made per document instead of per URL.
@@ -86,13 +86,14 @@ These extend D1's table and keep its rules.
 
 - `script(origins) -> String`.
 - `post_handle(environment, webview, path, info)`: `CreateWebFileSystemFileHandle` (read-write) plus `PostWebMessageAsJsonWithAdditionalObjects`, from the spike.
-- `run_open_command(...)`: the spike's six-step DevTools chain:
+- `run_open_command(...)`: the spike's DevTools chain, plus one check:
   1. Ctrl+Shift+P down;
   2. Ctrl+Shift+P up;
-  3. `insertText "Open File..."`;
-  4. a bounded 5 s readiness check that the selected entry is Open File;
-  5. Enter down;
-  6. Enter up.
+  3. a bounded 5 s check that the command palette's input has focus. This is new: without it, a palette that failed to open would leave the typed text in an open document;
+  4. `insertText "Open File..."`;
+  5. a bounded 5 s check that the selected entry is Open File;
+  6. Enter down;
+  7. Enter up.
 
   It checks `may_drive` before each step. It calls back with `Ok` or `Err(reason)` on the UI thread.
 
@@ -123,7 +124,7 @@ These extend D1's table and keep its rules.
   - a palette input that Ctrl+Shift+P shows and focuses, whose `aria-activedescendant` entry echoes the typed text;
   - Enter calls `showOpenFilePicker({multiple:false})` and records the file's name and text.
 - Cases:
-  1. **Launch with a file:** it opens through the command (`vscode-open done`). The page writes new text through the handle's `createWritable()`. The file on disk changes, its creation time is unchanged, and no `.crswap` file is left.
+  1. **Launch with a file:** it opens through the command (`vscode-open done`). The page writes new text through the handle's `createWritable()`. The file on disk changes and no `.crswap` file is left; whether its creation time is kept is recorded.
   2. **Two files from a second launch:** both open, in order, through two commands.
   3. **Gate 8 for handles and keys.** On `https://127.0.0.1:8445/`, `webwrap-ready` and `webwrap-vscode-open` are refused, and no key event reaches the page. A file forwarded meanwhile is delivered only after returning to `https://localhost:8445/`.
   4. **A palette that never appears:** the `?nopalette` page has none. The command fails (`vscode-open-failed`) and is not retried. This case runs last, and the app is then killed with its message box.
