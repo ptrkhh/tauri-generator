@@ -57,7 +57,7 @@ run(async () => {
 
   await check('vscode.dev opens a file given at launch', async () => {
     await showing(page, 'live-one.md', 'before');
-    await logged(app, /vscode-open done/, 'a finished Open File command');
+    await logged(app, /delivered live-one\.md/, 'the handle delivery in the log');
   });
 
   await check('Ctrl+S in vscode.dev changes the original file', async () => {

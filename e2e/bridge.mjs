@@ -36,40 +36,47 @@ const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
   if (location.search === '?autopopup') setTimeout(() => window.open('https://example.com/scripted'), 300);
 </script>`;
 
-// A stand-in for vscode.dev, enough for the vscodeDev adapter: Ctrl+Shift+P
-// opens a command palette whose selected entry echoes what is typed, and
-// Enter on "Open File..." asks showOpenFilePicker for one file, as
-// vscode.dev's pickFileAndOpen does. `?nopalette` has no palette at all.
+// A stand-in for vscode.dev, matching it where the vscodeDev adapter relies on
+// it (checked against live vscode.dev): a Ctrl+Shift+P keydown, even a
+// constructed one, opens a command palette; its input filters to a
+// highlighted entry; clicking "File: Open File..." asks showOpenFilePicker
+// for one file, then a little later opens it in a tab and focuses the editor.
+// `?nopalette` ignores Ctrl+Shift+P.
 const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-in</title>
 <div class=monaco-workbench>
-  <input id=palette hidden aria-activedescendant=pick><div id=pick role=option></div>
+  <div id=tabs></div>
+  <textarea id=editor></textarea>
+  <input id=palette hidden aria-activedescendant=entry><div id=entry role=option></div>
 </div>
 <script>
   window.__opened = [];
-  window.__keys = 0;
-  const palette = document.getElementById('palette');
-  const pick = document.getElementById('pick');
+  window.__keys = 0; // trusted key events: what a person, or DevTools, sends
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   addEventListener('keydown', (event) => {
-    __keys++;
+    if (event.isTrusted) __keys++;
     if (location.search !== '?nopalette' && event.ctrlKey && event.shiftKey && event.code === 'KeyP') {
-      event.preventDefault();
       palette.hidden = false;
       palette.value = '>';
-      pick.textContent = '';
+      entry.textContent = '';
       palette.focus();
-    } else if (event.key === 'Enter' && document.activeElement === palette) {
-      const command = pick.textContent;
-      palette.hidden = true;
-      palette.blur();
-      if (command === 'Open File...') openFile();
     }
   }, true);
-  palette.addEventListener('input', () => { pick.textContent = palette.value.slice(1); });
-  async function openFile() {
+  palette.addEventListener('input', () => {
+    entry.textContent = palette.value === '>Open File...' ? 'File: Open File...Ctrl+O' : '';
+  });
+  entry.addEventListener('click', async () => {
+    if (!entry.textContent) return;
+    palette.hidden = true;
     const [handle] = await showOpenFilePicker({ multiple: false });
+    await sleep(300);
     const file = await handle.getFile();
     __opened.push({ name: file.name, text: await file.text(), handle });
-  }
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.textContent = file.name;
+    tabs.append(tab);
+    editor.focus();
+  });
 </script>`;
 
 for (const [port, page] of [[8443, PAGE], [8444, PAGE], [8445, VSCODE_STAND_IN]]) {
@@ -299,7 +306,7 @@ async function checkVscodeAdapter() {
 
   await check('vscodeDev: a file given at launch opens through Open File and saves through its handle', async () => {
     assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
-    await logged(c, /vscode-open done/, 'a finished Open File command');
+    await logged(c, /delivered one\.md/, 'the handle delivery in the log');
     const created = fs.statSync(onePath).birthtimeMs;
     await pageC.evaluate(`(async () => {
       const writable = await __opened.find((f) => f.name === 'one.md').handle.createWritable();
@@ -314,44 +321,47 @@ async function checkVscodeAdapter() {
     process.stdout.write(`  observed: a handle save ${kept ? 'keeps' : 'does not keep'} the creation time\n`);
   });
 
-  await check('vscodeDev: two files from a second launch open one after the other', async () => {
+  await check('vscodeDev: two files from a second launch open one after the other, typing nothing', async () => {
     await forward(APP_C, DEBUG_C, makeFile('two.md', 'second file'), makeFile('three.md', 'third file'));
     assert((await opened(pageC, 'two.md')) === 'second file', 'two.md opened with the wrong text');
     assert((await opened(pageC, 'three.md')) === 'third file', 'three.md opened with the wrong text');
-    const names = await pageC.evaluate('__opened.map((f) => f.name)');
-    assert(names.join() === 'one.md,two.md,three.md', `opened ${names}`);
-    await until(() => count(c, 'vscode-open done') === 3, 'one Open File command per file');
+    await sleep(2000);
+    const seen = await pageC.evaluate(`[__opened.map((f) => f.name).join(), editor.value, __keys]`);
+    assert(seen[0] === 'one.md,two.md,three.md', `opened ${seen[0]}`);
+    assert(seen[1] === '' && seen[2] === 0, `input reached the page: editor "${seen[1]}", ${seen[2]} key events`);
   });
 
-  await check('gate 8, vscodeDev: no handle and no keys after navigating to an untrusted origin', async () => {
+  await check('gate 8, vscodeDev: no handle after navigating to an untrusted origin', async () => {
     await pageC.evaluate(`location.href = ${JSON.stringify(AWAY_C + '/')}`);
     await pageC.loaded(AWAY_C);
     await logged(c, /revoked 3 file tokens/, 'revocation in the log');
     await pageC.evaluate(`(() => {
       window.__messages = 0;
       chrome.webview.addEventListener('message', () => __messages++);
-      for (const type of ['webwrap-ready', 'webwrap-vscode-open']) chrome.webview.postMessage(JSON.stringify({ type }));
+      for (const message of [{ type: 'webwrap-ready' }, { type: 'webwrap-open-failed', token: '1' }]) {
+        chrome.webview.postMessage(JSON.stringify(message));
+      }
     })()`);
     await logged(c, /delivery-refused the page is not on a trusted origin/, 'refused readiness');
-    await logged(c, /open-refused the page is not on a trusted origin/, 'refused Open File command');
+    await logged(c, /open-failed-refused the page is not on a trusted origin/, 'refused failure report');
     await forward(APP_C, DEBUG_C, makeFile('while-away.md', 'opened after returning'));
     await sleep(3000);
-    const seen = await pageC.evaluate('[__messages, __keys, __opened.length]');
-    assert(seen.join() === '0,0,0', `the untrusted page got messages, keys, files: ${seen}`);
+    const seen = await pageC.evaluate('[__messages, __opened.length]');
+    assert(seen.join() === '0,0', `the untrusted page got messages, files: ${seen}`);
 
     await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/')}`);
     await pageC.loaded(HOME_C);
     assert((await opened(pageC, 'while-away.md')) === 'opened after returning', 'while-away.md text');
   });
 
-  await check('vscodeDev: an Open File command that cannot run fails once, without retrying', async () => {
+  await check('vscodeDev: when Open File cannot run, the user is told once', async () => {
     await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/?nopalette')}`);
     await pageC.loaded(HOME_C);
     await forward(APP_C, DEBUG_C, makeFile('no-palette.md', 'never opened'));
-    await logged(c, /vscode-open-failed the command palette did not open/, 'the failure in the log');
-    await sleep(7000); // longer than one run's 5 s wait
-    assert(count(c, 'vscode-open-failed') === 1, 'the failed command was retried');
-    assert((await pageC.evaluate('__keys')) === 1, 'more keys than one Ctrl+Shift+P reached the page');
+    // The adapter keeps trying to open the palette for 30 s first.
+    await until(() => /open-failed no-palette\.md/.test(c.log), 'the failure in the log', 45000);
+    await sleep(5000);
+    assert(count(c, 'open-failed no-palette') === 1, 'the failure was reported more than once');
   });
 }
 

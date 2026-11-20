@@ -17,28 +17,37 @@ Same as D1:
 
 ## What vscode.dev does, checked
 
-Read from the live workbench bundle (`workbench.web.main.internal.js`, build `8a14f0cc1b08d531eb83255ea3764ae22aa932b5`, 2026-11-20):
+Read from the live workbench bundle (`workbench.web.main.internal.js`, build `8a14f0cc1b08d531eb83255ea3764ae22aa932b5`, 2026-11-20), then tried against live vscode.dev in headless Chromium, with an origin-private file standing in for WebView2's handle:
 
-- **It has no `launchQueue` consumer.** The string does not occur, so D4's PWA tier cannot open files in it.
-- **"File: Open File..." (`pickFileAndOpen`) calls `showOpenFilePicker({multiple:false})`.** It then opens the returned handle with `registerFileHandle`. So the command opens exactly one handle per run.
-
-That leaves the spike's route: hand the page a real handle, and run the Open File command so that vscode.dev asks for it.
+- **No `launchQueue` consumer.** The string does not occur, so D4's PWA tier cannot open files in it.
+- **"File: Open File..." (`pickFileAndOpen`) calls `showOpenFilePicker({multiple:false})`** and opens the returned handle with `registerFileHandle`: exactly one file per run.
+- **Constructed events (`isTrusted: false`) drive the command palette.**
+  - A constructed Ctrl+Shift+P keydown opens it, since the keybinding service and the quick input never check `isTrusted`.
+  - Setting the input's value and firing `input` filters it to "File: Open File...".
+  - A constructed click on that highlighted row runs the command.
+  - A constructed Enter is ignored. vscode.dev's dispatcher receives it and matches nothing.
+- **End to end in Chromium:**
+  - three handles opened as three tabs, in order, in 1.3 s;
+  - Ctrl+S through DevTools input wrote the edited file through its handle;
+  - the other files were unchanged.
 
 ## Clarifications of the spec
 
-1. **One Open File command per file, in turn.**
-   - The adapter script keeps a queue of handles. Each `showOpenFilePicker` call takes one, and the script asks for another command while handles remain.
-   - The runtime runs one command at a time. A request that arrives while one runs is remembered and run next, never dropped and never run concurrently.
-2. **The adapter script reads the app's trusted origins from the spec** instead of hard-coding `https://vscode.dev`. This lets CI run the same script against a local test page (Task 4). The runtime still enforces origins natively; the script's check only keeps it from altering other sites.
-3. **Handles reuse D1's token model.**
+1. **The page script runs the Open File command; the runtime sends no input.**
+   - The spec followed the spike, which drove the command with DevTools key events and `Input.insertText`. Those go to whatever has focus when they arrive. The first review found that vscode.dev moving focus into an editor between the runtime's check and its keys would type "Open File..." into the user's file, which a later Ctrl+S saves.
+   - Constructed events dispatched on a checked element cannot do that: they have no default action, so nothing is ever typed.
+   - Doing it in the page also removes the runtime's DevTools chain, its command state, and keys reaching a focused cross-origin frame.
+2. **One file at a time.** The script keeps a queue. It runs Open File for the oldest file, answers vscode.dev's picker call with that file's handle, and waits for the file's tab before starting the next.
+3. **The adapter script reads the app's trusted origins from the spec** instead of hard-coding `https://vscode.dev`. This lets CI run the same script against a local stand-in (Task 4). The runtime still enforces origins natively; the script's check only keeps it from altering other sites.
+4. **Handles reuse D1's token model.**
    - A handle is posted only through `Session::ready`, then `Session::delivery_read`, exactly like a shared buffer. So gate 8 and the pending-navigation hold apply unchanged.
    - There is no shared buffer and no `webwrap-save*` message for this adapter. Saving is vscode.dev's own `createWritable()` on the handle, which WebView2 carries out.
    - Chromium writes a `.crswap` file next to the original and moves it over the original on `close()`. Task 4 asserts that no swap file is left. Whether the original keeps its creation time is WebView2's behaviour, not the runtime's, so Task 4 records it rather than asserting it.
-4. **The Open File command is driven only into the document that asked.**
-   - Before each DevTools step, the runtime checks two things: the live document is still the one the request came from (`Session::document`), and it may still be posted to.
-   - Otherwise it stops. The check is the spike's, made per document instead of per URL.
-5. **A failed command shows a message box and is not retried.** The page keeps the handle, and the message says vscode.dev's own File > Open File... will open it. Retrying automatically could type into the page repeatedly.
-6. **Ctrl+O needs no code.** With no handle waiting, the script passes `showOpenFilePicker` through to WebView2's native picker. The hands-on PC run checks that it saves back. CI cannot drive the Windows dialog reliably.
+5. **If the command cannot run, the user is told once.**
+   - The script tries Ctrl+Shift+P for up to 30 s, because early on vscode.dev may not handle keys yet.
+   - It then posts `webwrap-open-failed`. The runtime shows a message box naming the file, saying that vscode.dev's own File > Open File... will open it.
+   - The file stays queued in the page, so that command does open it. Nothing retries automatically.
+6. **Ctrl+O needs no code.** With nothing queued, the script passes `showOpenFilePicker` through to WebView2's native picker. The hands-on PC run checks that it saves back. CI cannot drive the Windows dialog reliably.
 7. **The live test runs on every push and weekly.**
    - A separate CI step runs it, so a vscode.dev outage reads as that step failing, not the bridge.
    - The workflow gains a weekly `schedule`.
@@ -50,21 +59,15 @@ These extend D1's table and keep its rules.
 | Direction | Message | Meaning |
 | --- | --- | --- |
 | host → page | message `{"type":"webwrap-file-handle","token","name"}` with one `FileSystemFileHandle` in `additionalObjects` | One opened file, read-write. Only for the `vscodeDev` adapter. |
-| page → host | `{"type":"webwrap-vscode-open"}` | The page holds a handle. Run vscode.dev's Open File command once. Honoured only for the `vscodeDev` adapter, from a trusted, ready document. |
+| page → host | `{"type":"webwrap-open-failed","token"}` | vscode.dev did not open this delivered file. Honoured only for the `vscodeDev` adapter, from a trusted page, for a token delivered to it; the runtime shows a message box naming the file. |
 
 ## Task 1: `webwrap-bridge` session additions
 
-- `PageMessage::VscodeOpen` (`"webwrap-vscode-open"`).
-- `Session::document() -> u64`: the current document's generation, which `document_changed` already increments.
-- `Session::open_command(source, live) -> Result<u64, Refusal>`:
-  - refuses an untrusted source or live document, or one that is not ready;
-  - refuses while an untrusted navigation is pending;
-  - otherwise returns `document()`.
-- `Session::may_drive(document, live) -> bool`: `document == self.document() && self.may_post(live)`.
+- `PageMessage::OpenFailed { token }` (`"webwrap-open-failed"`).
+- `Session::delivered_name(source, live, token) -> Result<&str, Refusal>`: the name of a delivered file, only for a trusted source and live document.
 - Tests:
   - the message parses;
-  - an untrusted source, an unready document, and a pending navigation are each refused;
-  - a new document makes an earlier `document()` stale for `may_drive`.
+  - an untrusted source or live document, a queued, unknown, or differently spelled token, and a token revoked by an untrusted document are each refused.
 
 ## Task 2: runtime
 
@@ -73,41 +76,24 @@ These extend D1's table and keep its rules.
 - Passes `spec.adapter` to `Bridge::install`.
 - For `Adapter::VscodeDev`, adds `vscode::script(&trusted_origins)` as an initialization script.
 
-**`src/vscode.js`** (ported from the spike)
+**`src/vscode.js`**
 
 - Runs only in the top-level document of a trusted origin; the origins are JSON substituted by `vscode::script`.
-- Replaces `showOpenFilePicker`:
-  - with a handle queued, it returns `[handle]`, and posts `webwrap-vscode-open` if more remain;
-  - otherwise it calls the original picker.
 - Posts `webwrap-ready` once `.monaco-workbench` exists.
-- On `webwrap-file-handle`, it queues the handle and posts `webwrap-vscode-open`.
+- On `webwrap-file-handle`, it queues the handle and runs the queue (clarifications 1, 2, and 5). `showOpenFilePicker` answers from the queue, or calls the native picker when it is empty.
 
 **`src/vscode.rs`**
 
 - `script(origins) -> String`.
-- `post_handle(environment, webview, path, info)`: `CreateWebFileSystemFileHandle` (read-write) plus `PostWebMessageAsJsonWithAdditionalObjects`, from the spike.
-- `run_open_command(...)`: the spike's DevTools chain, plus one check:
-  1. Ctrl+Shift+P down;
-  2. Ctrl+Shift+P up;
-  3. a bounded 5 s check that the command palette's input has focus. This is new: without it, a palette that failed to open would leave the typed text in an open document;
-  4. `insertText "Open File..."`;
-  5. a bounded 5 s check that the selected entry is Open File;
-  6. Enter down;
-  7. Enter up.
-
-  It checks `may_drive` before each step. It calls back with `Ok` or `Err(reason)` on the UI thread.
+- `post_handle(environment, webview, path, message)`: `CreateWebFileSystemFileHandle` (read-write) plus `PostWebMessageAsJsonWithAdditionalObjects`, from the spike.
 
 **`bridge.rs`**
 
-- `Bridge` gains `adapter` and two flags: `opening` and `open_again`.
-- `start` posts handles for `vscodeDev` (`post_handle_delivery`: `delivery_read`, then `Post` or `Retry`, as `finish_read` does). It reads into buffers otherwise.
-- `on_message(VscodeOpen)`:
-  - refused unless the adapter is `vscodeDev` and `open_command` passes (log `open-refused`);
-  - if a command is running, sets `open_again`;
-  - otherwise runs one.
-- When a command finishes:
-  - success logs `vscode-open done`, and if `open_again` is set it clears it and runs the next;
-  - failure logs `vscode-open-failed <reason>`, clears `open_again`, and shows the message box.
+- `Bridge` gains `adapter`.
+- `start` posts handles for `vscodeDev` (`post_handle`: `delivery_read`, then `Post` or `Retry`, as `finish_read` does). It reads into buffers otherwise.
+- `on_message(OpenFailed)`:
+  - logs `open-failed <name>` and shows the message box;
+  - is refused (`open-failed-refused`) for another adapter, or when `delivered_name` refuses.
 
 ## Task 3: delete the spike
 
@@ -119,15 +105,17 @@ These extend D1's table and keep its rules.
 **Local, deterministic** (in `e2e/bridge.mjs`):
 
 - A third app, `bridge-c`, uses `--adapter vscodeDev` for `https://localhost:8445/`.
-- That port serves a stand-in for vscode.dev:
-  - a `.monaco-workbench` element;
-  - a palette input that Ctrl+Shift+P shows and focuses, whose `aria-activedescendant` entry echoes the typed text;
-  - Enter calls `showOpenFilePicker({multiple:false})` and records the file's name and text.
+- That port serves a stand-in that matches vscode.dev where the adapter relies on it:
+  - a constructed Ctrl+Shift+P opens a palette;
+  - its input filters to a highlighted entry;
+  - clicking "File: Open File..." calls `showOpenFilePicker({multiple:false})`. Then, 300 ms later, it opens a tab and focuses a `<textarea>` editor.
 - Cases:
-  1. **Launch with a file:** it opens through the command (`vscode-open done`). The page writes new text through the handle's `createWritable()`. The file on disk changes and no `.crswap` file is left; whether its creation time is kept is recorded.
-  2. **Two files from a second launch:** both open, in order, through two commands.
-  3. **Gate 8 for handles and keys.** On `https://127.0.0.1:8445/`, `webwrap-ready` and `webwrap-vscode-open` are refused, and no key event reaches the page. A file forwarded meanwhile is delivered only after returning to `https://localhost:8445/`.
-  4. **A palette that never appears:** the `?nopalette` page has none. The command fails (`vscode-open-failed`) and is not retried. This case runs last, and the app is then killed with its message box.
+  1. **Launch with a file:** it opens. The page writes new text through the handle's `createWritable()`. The file on disk changes and no `.crswap` file is left; whether its creation time is kept is recorded.
+  2. **Two files from a second launch:** both open, in order. The editor stays empty and the page sees no trusted key event.
+  3. **Gate 8 for handles.**
+     - On `https://127.0.0.1:8445/`, `webwrap-ready` and `webwrap-open-failed` are refused, and no message reaches the page.
+     - A file forwarded meanwhile is delivered only after returning to `https://localhost:8445/`.
+  4. **No palette (`?nopalette`):** after the script's 30 s of tries, the user is told once (`open-failed no-palette.md`).
 
 **Live** (`e2e/vscode-live.mjs`, its own CI step):
 
@@ -140,7 +128,7 @@ These extend D1's table and keep its rules.
 **Workflow**
 
 - Generates `bridge-c` and the live app.
-- Adds the `vscode-dev` acceptance app (`--url vscode.dev --adapter vscodeDev --assoc .md text/markdown "Markdown document"`) for the PC run.
+- Adds the `vscode` acceptance app (`--url vscode.dev --adapter vscodeDev --assoc .md text/markdown "Markdown document"`) for the PC run.
 - Adds `schedule: cron: "17 5 * * 1"`.
 
 ## Task 5: evidence, review, handover
@@ -149,6 +137,6 @@ These extend D1's table and keep its rules.
 - An independent review of the branch diff, with the findings fixed or recorded.
 - Update `HANDOVER.md` and the spec status.
 - Append the D2 hands-on checks to `docs/windows-runs/NEXT.md`:
-  - double-click-style open, by dropping on the exe;
+  - opening by dropping a file on the exe;
   - Ctrl+O through the native dialog, then Ctrl+S;
   - a second file opening as a new tab.
