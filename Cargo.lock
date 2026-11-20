@@ -4027,6 +4027,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "webwrap-bridge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "webwrap-spec",
+]
+
+[[package]]
 name = "webwrap-generate"
 version = "0.1.0"
 dependencies = [

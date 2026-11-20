@@ -5,6 +5,8 @@ use url::Url;
 pub enum NavEvent {
     TopLevel,
     NewWindow,
+    /// A navigation inside an iframe.
+    Frame,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,10 +29,9 @@ impl Verdict {
 /// every OAuth redirect to an identity provider and break login, so the
 /// navigation verdict depends only on the scheme and the event kind.
 pub fn nav_verdict(url: &str, event: NavEvent) -> Verdict {
-    let scheme = Url::parse(url)
-        .ok()
-        .map(|parsed| parsed.scheme().to_string());
-    match (event, scheme.as_deref()) {
+    let parsed = Url::parse(url).ok();
+    let scheme = parsed.as_ref().map(Url::scheme);
+    match (event, scheme) {
         // A pop-up is handed to the system browser, so only the two schemes a
         // browser is expected to take may take that path. `OpenExternally`
         // becomes a shell open in the runtime, and letting remote page content
@@ -42,6 +43,18 @@ pub fn nav_verdict(url: &str, event: NavEvent) -> Verdict {
         (NavEvent::NewWindow, _) => Verdict::Block,
         (NavEvent::TopLevel, Some("https")) => Verdict::Allow,
         (NavEvent::TopLevel, _) => Verdict::Block,
+        // Frames may use every scheme a page renders by itself, so sites that
+        // embed blob: or data: frames keep working. Anything else would be
+        // handed to a Windows protocol handler.
+        (NavEvent::Frame, Some("https" | "http" | "blob" | "data")) => Verdict::Allow,
+        (NavEvent::Frame, Some("about"))
+            if parsed
+                .as_ref()
+                .is_some_and(|url| matches!(url.path(), "blank" | "srcdoc")) =>
+        {
+            Verdict::Allow
+        }
+        (NavEvent::Frame, _) => Verdict::Block,
     }
 }
 
@@ -133,6 +146,31 @@ mod tests {
                 Verdict::Block,
                 "{url}"
             );
+        }
+    }
+
+    #[test]
+    fn frames_may_load_web_content_but_never_an_external_scheme() {
+        for url in [
+            "https://example.com/",
+            "http://example.com/",
+            "blob:https://example.com/0f8f",
+            "data:text/html,hi",
+            "about:blank",
+            "about:srcdoc",
+        ] {
+            assert_eq!(nav_verdict(url, NavEvent::Frame), Verdict::Allow, "{url}");
+        }
+        for url in [
+            "search-ms:query=x",
+            "ms-msdt:/id PCWDiagnostic",
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "about:settings",
+            "mailto:a@b.test",
+            "garbage",
+        ] {
+            assert_eq!(nav_verdict(url, NavEvent::Frame), Verdict::Block, "{url}");
         }
     }
 
