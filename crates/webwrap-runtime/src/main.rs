@@ -7,6 +7,7 @@ mod bridge;
 mod embedded_spec;
 mod hardening;
 mod inspect;
+mod photopea;
 mod report;
 mod save;
 mod single_instance;
@@ -170,6 +171,20 @@ fn run(
     let title = spec.display_name;
     let trusted_origins = spec.trusted_origins;
     let adapter = spec.adapter;
+    let associations = spec.file_associations;
+    // Photopea runs inside the runtime's own shell page, which is then the
+    // only page the bridge trusts; every other adapter trusts the site.
+    let (start, bridge_origins) = match adapter {
+        Adapter::Photopea => (
+            WebviewUrl::App(photopea::SHELL_PAGE.into()),
+            vec![photopea::SHELL_ORIGIN.to_owned()],
+        ),
+        _ => (WebviewUrl::External(url), trusted_origins.clone()),
+    };
+    let photopea_script = photopea::script(
+        &spec.launch_url,
+        trusted_origins.first().map_or("", String::as_str),
+    );
 
     // Started before the window exists so a later launch is answered at once;
     // its files wait in the channel until the bridge is ready.
@@ -180,12 +195,22 @@ fn run(
 
     let result = tauri::Builder::default()
         .setup(move |app| {
-            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url));
+            let mut builder = WebviewWindowBuilder::new(app, "main", start);
             if let Some(args) = browser_args_from_env() {
                 builder = builder.additional_browser_args(&args);
             }
-            if adapter == Adapter::VscodeDev {
-                builder = builder.initialization_script(vscode::script(&trusted_origins));
+            match adapter {
+                Adapter::VscodeDev => {
+                    builder = builder.initialization_script(vscode::script(&trusted_origins));
+                }
+                // The top level must be https: the navigation policy allows
+                // nothing else there, and only https origins can be trusted.
+                Adapter::Photopea => {
+                    builder = builder
+                        .use_https_scheme(true)
+                        .initialization_script(photopea_script);
+                }
+                Adapter::None => {}
             }
             let window = builder
                 .title(title)
@@ -211,13 +236,14 @@ fn run(
             if let Ok(hwnd) = window.hwnd() {
                 use_main_icon(hwnd);
             }
-            let bridge = match Bridge::install(&window, trusted_origins, adapter, files) {
-                Ok(bridge) => bridge,
-                Err(error) => report::abort(
-                    &format!("this app's safety checks could not be installed: {error}"),
-                    true,
-                ),
-            };
+            let bridge =
+                match Bridge::install(&window, bridge_origins, adapter, associations, files) {
+                    Ok(bridge) => bridge,
+                    Err(error) => report::abort(
+                        &format!("this app's safety checks could not be installed: {error}"),
+                        true,
+                    ),
+                };
             // Closing waits for a save being written: the process ends with
             // the window, which would kill the write half done.
             let holder = bridge.clone();

@@ -118,6 +118,34 @@ pub fn handle_refusal(path: &Path, protected: &[PathBuf]) -> Option<&'static str
         )
 }
 
+/// Whether `bytes`, about to replace `path`, are in the format its
+/// extension names. An editor that exports one format must never write it
+/// into a file of another, such as PSD bytes into a `.png`.
+pub fn save_signature_ok(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let matches = match extension.as_str() {
+        "psd" => bytes.starts_with(b"8BPS"),
+        "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "jpg" | "jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        _ => {
+            return Err("Photopea saves back only PSD, PNG, JPEG and WebP files. \
+                 Use File > Export as to save a copy in another format."
+                .into())
+        }
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(format!(
+            "the data Photopea exported is not a .{extension} file, so the file was not changed."
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +240,23 @@ mod tests {
                 "{share}"
             );
         }
+    }
+
+    #[test]
+    fn a_save_must_match_the_format_its_file_extension_names() {
+        let ok = |name: &str, bytes: &[u8]| save_signature_ok(Path::new(name), bytes);
+        assert!(ok("a.psd", b"8BPS\x00\x01").is_ok());
+        assert!(ok("A.PSD", b"8BPS").is_ok());
+        assert!(ok("a.png", b"\x89PNG\r\n\x1a\nrest").is_ok());
+        assert!(ok("a.jpeg", &[0xFF, 0xD8, 0xFF, 0xE0]).is_ok());
+        assert!(ok("a.jpg", &[0xFF, 0xD8, 0xFF, 0xDB]).is_ok());
+        assert!(ok("a.webp", b"RIFF\x10\x00\x00\x00WEBPVP8 ").is_ok());
+        // PSD bytes never land in a PNG, and the reverse.
+        assert!(ok("a.png", b"8BPS").unwrap_err().contains(".png"));
+        assert!(ok("a.psd", b"\x89PNG\r\n\x1a\n").is_err());
+        assert!(ok("a.webp", b"RIFF\x10\x00\x00\x00WAVEfmt ").is_err());
+        assert!(ok("a.psd", b"").is_err());
+        assert!(ok("a.tif", b"8BPS").unwrap_err().contains("Export as"));
+        assert!(ok("noextension", b"8BPS").is_err());
     }
 }
