@@ -58,9 +58,21 @@ export function makeFile(name, content) {
 
 export const logged = (app, pattern, what) => until(() => pattern.test(app.log), what);
 
-export async function check(name, body) {
+/** Run one check. On failure, `explain` may print what the page looked like. */
+export async function check(name, body, explain) {
   process.stdout.write(`- ${name}\n`);
-  await body();
+  try {
+    await body();
+  } catch (error) {
+    if (explain) {
+      try {
+        process.stdout.write(`  diagnosis:\n${await explain()}\n`);
+      } catch (failed) {
+        process.stdout.write(`  (diagnosis failed: ${failed.message})\n`);
+      }
+    }
+    throw error;
+  }
   process.stdout.write(`  PASS ${name}\n`);
 }
 

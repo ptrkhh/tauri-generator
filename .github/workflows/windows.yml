@@ -163,4 +163,7 @@ jobs:
         if: failure()
         with:
           name: failure-screenshot-${{ matrix.target }}
-          path: ${{ runner.temp }}/failure.png
+          path: |
+            ${{ runner.temp }}/failure.png
+            ${{ runner.temp }}/vscode-live.png
+          if-no-files-found: ignore

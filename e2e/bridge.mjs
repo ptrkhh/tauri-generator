@@ -51,9 +51,11 @@ const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-
 <script>
   window.__opened = [];
   window.__keys = 0; // trusted key events: what a person, or DevTools, sends
+  window.__trail = []; // what happened, for a failure report
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   addEventListener('keydown', (event) => {
     if (event.isTrusted) __keys++;
+    __trail.push(\`keydown \${event.key} ctrl=\${event.ctrlKey} shift=\${event.shiftKey} trusted=\${event.isTrusted}\`);
     if (location.search !== '?nopalette' && event.ctrlKey && event.shiftKey && event.code === 'KeyP') {
       palette.hidden = false;
       palette.value = '>';
@@ -62,14 +64,20 @@ const VSCODE_STAND_IN = `<!doctype html><meta charset=utf-8><title>vscode stand-
     }
   }, true);
   palette.addEventListener('input', () => {
+    __trail.push('input ' + palette.value);
     entry.textContent = palette.value === '>Open File...' ? 'File: Open File...Ctrl+O' : '';
   });
   entry.addEventListener('click', async () => {
+    __trail.push('click ' + entry.textContent);
     if (!entry.textContent) return;
     palette.hidden = true;
     const [handle] = await showOpenFilePicker({ multiple: false });
+    __trail.push('picker returned ' + handle?.name);
     await sleep(300);
-    const file = await handle.getFile();
+    const file = await handle.getFile().catch((error) => {
+      __trail.push('getFile failed: ' + error);
+      throw error;
+    });
     __opened.push({ name: file.name, text: await file.text(), handle });
     const tab = document.createElement('div');
     tab.className = 'tab';
@@ -129,7 +137,12 @@ const result = (page, token) =>
   until(() => page.evaluate(`window.__ww?.results.find((r) => r.token === ${JSON.stringify(token)})`), `save result for ${token}`);
 /** The text of a file the vscode stand-in opened. */
 const opened = (page, name) =>
-  until(() => page.evaluate(`window.__opened?.find((f) => f.name === ${JSON.stringify(name)})?.text`), `${name} to open`);
+  until(() => page.evaluate(`window.__opened?.find((f) => f.name === ${JSON.stringify(name)})?.text`), `${name} to open`, 45000);
+/** For a failed vscodeDev check: the stand-in's trail and the page's errors. */
+const explainStandIn = (page) => async () =>
+  [`  url ${await page.evaluate('location.href')}`,
+    ...(await page.evaluate('window.__trail ?? []')).map((line) => `  trail: ${line}`),
+    ...page.problems.slice(-20).map((line) => `  ${line}`)].join('\n');
 const count = (app, pattern) => (app.log.match(new RegExp(pattern, 'g')) ?? []).length;
 
 /** Saving must never leave its temporary, backup, or swap files behind. */
@@ -319,7 +332,7 @@ async function checkVscodeAdapter() {
     // Recorded, not asserted: WebView2, not the runtime, performs this write.
     const kept = fs.statSync(onePath).birthtimeMs === created;
     process.stdout.write(`  observed: a handle save ${kept ? 'keeps' : 'does not keep'} the creation time\n`);
-  });
+  }, explainStandIn(pageC));
 
   await check('vscodeDev: two files from a second launch open one after the other, typing nothing', async () => {
     await forward(APP_C, DEBUG_C, makeFile('two.md', 'second file'), makeFile('three.md', 'third file'));
@@ -329,7 +342,7 @@ async function checkVscodeAdapter() {
     const seen = await pageC.evaluate(`[__opened.map((f) => f.name).join(), editor.value, __keys]`);
     assert(seen[0] === 'one.md,two.md,three.md', `opened ${seen[0]}`);
     assert(seen[1] === '' && seen[2] === 0, `input reached the page: editor "${seen[1]}", ${seen[2]} key events`);
-  });
+  }, explainStandIn(pageC));
 
   await check('gate 8, vscodeDev: no handle after navigating to an untrusted origin', async () => {
     await pageC.evaluate(`location.href = ${JSON.stringify(AWAY_C + '/')}`);
@@ -352,7 +365,7 @@ async function checkVscodeAdapter() {
     await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/')}`);
     await pageC.loaded(HOME_C);
     assert((await opened(pageC, 'while-away.md')) === 'opened after returning', 'while-away.md text');
-  });
+  }, explainStandIn(pageC));
 
   await check('vscodeDev: when Open File cannot run, the user is told once', async () => {
     await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/?nopalette')}`);
@@ -362,7 +375,7 @@ async function checkVscodeAdapter() {
     await until(() => /open-failed no-palette\.md/.test(c.log), 'the failure in the log', 45000);
     await sleep(5000);
     assert(count(c, 'open-failed no-palette') === 1, 'the failure was reported more than once');
-  });
+  }, explainStandIn(pageC));
 }
 
 run(main);
