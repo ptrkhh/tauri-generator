@@ -186,19 +186,23 @@ function pickInDialog(pid, file) {
 '@
     $A = [System.Windows.Automation.AutomationElement]
     $T = [System.Windows.Automation.TreeScope]
-    $fileName = [System.Windows.Automation.AndCondition]::new(
-      [System.Windows.Automation.PropertyCondition]::new($A::AutomationIdProperty, '1148'),
-      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit))
-    $open = [System.Windows.Automation.AndCondition]::new(
-      [System.Windows.Automation.PropertyCondition]::new($A::AutomationIdProperty, '1'),
-      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button))
+    $edits = [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
+    $buttons = [System.Windows.Automation.OrCondition]::new(
+      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button),
+      [System.Windows.Automation.PropertyCondition]::new($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::SplitButton))
+    $describe = { param($items) ($items | ForEach-Object { "$($_.Current.ControlType.ProgrammaticName)[$($_.Current.AutomationId)] '$($_.Current.Name)'" }) -join ', ' }
     $deadline = (Get-Date).AddSeconds(30)
     $box = $null
     $seen = ''
+    $inside = ''
     do {
       foreach ($window in [TopWindows]::Of([uint32]$env:APP_PID, [ref]$seen)) {
-        $found = $A::FromHandle($window).FindFirst($T::Descendants, $fileName)
-        if ($found) { $box = $found; $dialog = $A::FromHandle($window) }
+        $element = $A::FromHandle($window)
+        if ($element.Current.Name -ne 'Open') { continue }
+        $candidates = @($element.FindAll($T::Descendants, $edits))
+        $inside = (& $describe $candidates) + ' | ' + (& $describe @($element.FindAll($T::Descendants, $buttons)))
+        $found = $candidates | Where-Object { $_.Current.AutomationId -eq '1148' -or $_.Current.Name -like 'File name*' } | Select-Object -First 1
+        if ($found) { $box = $found; $dialog = $element }
       }
       if (-not $box) { Start-Sleep -Milliseconds 500 }
     } until ($box -or (Get-Date) -gt $deadline)
@@ -207,10 +211,12 @@ function pickInDialog(pid, file) {
       $shot = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
       [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
       if ($env:RUNNER_TEMP) { $shot.Save((Join-Path $env:RUNNER_TEMP 'open-dialog.png')) }
-      throw "no open dialog with a file-name box; the app's visible windows: $seen"
+      throw "no file-name box; the app's visible windows: $seen; inside Open: $inside"
     }
     $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($env:PICK_PATH)
-    $dialog.FindFirst($T::Descendants, $open).GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $button = @($dialog.FindAll($T::Descendants, $buttons)) | Where-Object { $_.Current.AutomationId -eq '1' -or $_.Current.Name -eq 'Open' } | Select-Object -First 1
+    if (-not $button) { throw "no Open button; inside Open: $inside" }
+    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     'picked'`;
   return execFileSync('powershell', ['-NoProfile', '-Command', script], {
     env: { ...process.env, APP_PID: String(pid), PICK_PATH: file },
