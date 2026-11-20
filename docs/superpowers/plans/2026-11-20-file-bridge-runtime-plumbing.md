@@ -27,6 +27,7 @@ These are decided here; the evidence will list them as deviations.
 7. **Files dropped on the window reach the site.** Tauri's drag-and-drop interception is switched off, so a site receives the drop exactly as in a browser, open-only. Today a drop does nothing at all.
 8. **A second launch checks who owns the pipe before sending anything.** The pipe's owner is set explicitly to the user, which another user cannot forge. If the owner differs, the launch sends nothing and runs on its own. This closes a pipe pre-created by another user (review finding).
 9. **Opened paths are canonical** (`dunce::canonicalize`), so saving a symlinked file replaces the target, not the link, and paths over 260 characters keep the `\\?\` prefix `ReplaceFileW` needs.
+10. **The runtime honours `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` itself.** WebView2 ignores the variable once an app passes browser arguments of its own, and wry always does; CI saw the browser process start without the test's flags. The runtime appends the variable to wry's defaults, which restores WebView2's documented behaviour. It gives a process that can set the app's environment nothing it did not already have.
 
 ## The page protocol
 

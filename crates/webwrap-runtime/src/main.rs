@@ -136,6 +136,23 @@ fn use_main_icon(hwnd: HWND) {
     }
 }
 
+/// wry's own WebView2 browser arguments, as the CI end-to-end run observed
+/// them on the browser process for this Tauri and wry version.
+const WRY_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+     --autoplay-policy=no-user-gesture-required";
+
+/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, added after wry's own arguments.
+///
+/// WebView2 documents this variable for testing and diagnosis, but ignores it
+/// once an app passes arguments of its own, and wry always does. Honouring it
+/// here restores the documented behaviour; it gives nothing to a process that
+/// can set this app's environment that it did not already have.
+fn browser_args_from_env() -> Option<String> {
+    let extra = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok()?;
+    let extra = extra.trim();
+    (!extra.is_empty()).then(|| format!("{WRY_BROWSER_ARGS} {extra}"))
+}
+
 fn run(
     spec: AppSpec,
     data_dir: PathBuf,
@@ -159,7 +176,11 @@ fn run(
 
     let result = tauri::Builder::default()
         .setup(move |app| {
-            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url));
+            if let Some(args) = browser_args_from_env() {
+                builder = builder.additional_browser_args(&args);
+            }
+            let window = builder
                 .title(title)
                 // Every generated app shares this compiled runtime and its
                 // tauri.conf.json identifier, so without this they would all
