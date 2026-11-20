@@ -2,9 +2,11 @@
 //! in a window.
 
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
+use webwrap_pack::spec::MAX_ICON_BYTES;
 use webwrap_pack::{generate, inspect, AppInput, PackError, Templates};
 use webwrap_spec::{Adapter, Assoc};
 
@@ -43,6 +45,9 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
             | "--template-arm64" | "--input" => 1,
             _ => return Err(format!("unknown argument: {flag}")),
         };
+        if flag != "--assoc" && flags.iter().any(|(seen, _)| *seen == flag) {
+            return Err(format!("{flag} given twice"));
+        }
         let mut values = Vec::new();
         for _ in 0..count {
             match args.next() {
@@ -55,7 +60,6 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
     let take = |name: &str| -> Option<String> {
         flags
             .iter()
-            .rev()
             .find(|(flag, _)| flag == name)
             .map(|(_, values)| values[0].clone())
     };
@@ -136,7 +140,17 @@ fn run_generate(args: GenerateArgs) -> Value {
         ),
         None => (EMBEDDED_X64.to_vec(), EMBEDDED_ARM64.to_vec()),
     };
-    let icon = read(&args.icon);
+    // Read one byte past the limit, so check_icon rejects an oversized file
+    // without the whole of it (or an endless device) landing in memory.
+    let mut icon = Vec::new();
+    fs::File::open(&args.icon)
+        .and_then(|file| file.take(MAX_ICON_BYTES as u64 + 1).read_to_end(&mut icon))
+        .unwrap_or_else(|error| {
+            exit(
+                1,
+                format!("could not read {}: {error}", args.icon.display()),
+            )
+        });
     let templates = Templates {
         x64: &x64,
         arm64: &arm64,

@@ -18,6 +18,11 @@ pub enum PackError {
         action: &'static str,
         error: std::io::Error,
     },
+    /// The app at an output path is running, so it cannot be replaced.
+    InUse {
+        path: PathBuf,
+        error: std::io::Error,
+    },
     /// A staged app did not read back as written.
     Verify { path: PathBuf, reason: String },
     /// The first app was published but the second was not.
@@ -47,6 +52,12 @@ impl fmt::Display for PackError {
                 action,
                 error,
             } => write!(f, "could not {action} {}: {error}", path.display()),
+            Self::InUse { path, error } => write!(
+                f,
+                "{} is in use, probably because the app is running ({error}); \
+                 close it and generate again",
+                path.display()
+            ),
             Self::Verify { path, reason } => {
                 write!(f, "{} did not verify after writing: {reason}", path.display())
             }

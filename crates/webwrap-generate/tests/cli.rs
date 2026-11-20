@@ -57,6 +57,7 @@ fn usage_errors_exit_2() {
         vec!["inspect", "--input", "a.exe", "--url", "x"],
         vec!["generate", "--url", "twitter.com"],
         vec!["generate", "--assoc", ".md", "text/markdown"],
+        vec!["inspect", "--input", "a.exe", "--input", "b.exe"],
     ] {
         assert_eq!(run(&args).status.code(), Some(2), "{args:?}");
     }
@@ -91,6 +92,13 @@ fn invalid_input_exits_2_and_unreadable_files_exit_1() {
         run(&["inspect", "--input", "no-such.exe"]).status.code(),
         Some(1)
     );
+
+    // An oversized icon is refused as invalid input, read only up to the limit.
+    let huge = dir.join("huge.png");
+    std::fs::write(&huge, vec![0u8; 11 * 1024 * 1024]).unwrap();
+    let mut oversized = base.to_vec();
+    oversized.extend(["--url", "twitter.com", "--icon", huge.to_str().unwrap()]);
+    assert_eq!(run(&oversized).status.code(), Some(2));
 }
 
 #[test]

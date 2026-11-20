@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use image::{ImageFormat, ImageReader};
+use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 use url::Url;
 use webwrap_spec::{
     app_identity, canonicalize_url, Adapter, AppSpec, Assoc, DnsMode, SpecError,
@@ -16,6 +16,13 @@ use crate::PackError;
 pub const APP_VERSION: &str = "1.0.0";
 pub const MAX_ICON_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_ICON_SIDE: u32 = 4096;
+/// What the PNG decoder may allocate when decoding: a full-size RGBA icon
+/// plus slack. png 0.18.1 inflates an ICC profile only up to this bound and
+/// silently drops a larger one (`parse_iccp`), so a profile cannot exhaust
+/// memory and is never an error.
+const ICON_MAX_ALLOC: u64 = (MAX_ICON_SIDE as u64).pow(2) * 4 + 16 * 1024 * 1024;
+/// The same bound for `check_icon`, which needs only the dimensions.
+const ICON_CHECK_MAX_ALLOC: u64 = 8 * 1024 * 1024;
 
 /// What the user chose. Everything else in the specification is derived.
 #[derive(Debug, Clone)]
@@ -117,7 +124,7 @@ pub fn check_icon(png: &[u8]) -> Result<(), PackError> {
             png.len()
         )));
     }
-    let (width, height) = ImageReader::with_format(Cursor::new(png), ImageFormat::Png)
+    let (width, height) = icon_reader(png, ICON_CHECK_MAX_ALLOC, None)
         .into_dimensions()
         .map_err(|error| bad(format!("is not a readable PNG: {error}")))?;
     if width != height {
@@ -129,6 +136,28 @@ pub fn check_icon(png: &[u8]) -> Result<(), PackError> {
         )));
     }
     Ok(())
+}
+
+/// A PNG reader whose allocations, including the ICC profile it inflates
+/// before any pixels, are bounded by `max_alloc`.
+fn icon_reader(png: &[u8], max_alloc: u64, max_side: Option<u32>) -> ImageReader<Cursor<&[u8]>> {
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    limits.max_image_width = max_side;
+    limits.max_image_height = max_side;
+    let mut reader = ImageReader::with_format(Cursor::new(png), ImageFormat::Png);
+    reader.limits(limits);
+    reader
+}
+
+/// Decode an icon under the same bounds `check_icon` enforces.
+pub(crate) fn decode_icon(png: &[u8]) -> Result<DynamicImage, PackError> {
+    icon_reader(png, ICON_MAX_ALLOC, Some(MAX_ICON_SIDE))
+        .decode()
+        .map_err(|error| PackError::Input {
+            field: "icon",
+            reason: error.to_string(),
+        })
 }
 
 #[cfg(test)]

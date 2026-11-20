@@ -80,7 +80,7 @@ pub fn generate(
             reason: format!("{} does not exist or is not a folder", out_dir.display()),
         });
     }
-    let mut outputs = Vec::new();
+    let mut outputs: Vec<Output> = Vec::new();
     for arch in Arch::ALL {
         let path = out_dir.join(format!("{}-{}.exe", spec.slug, arch.suffix()));
         let replaced = existing(&path, &spec.app_id)?;
@@ -114,33 +114,36 @@ pub fn generate(
         )?);
     }
 
-    let mut staged = Vec::new();
-    let checked = outputs.iter().zip(&apps).try_for_each(|(output, app)| {
-        let path = stage(out_dir, app, &mut staged)?;
-        verify(&path, output, &spec_bytes, &spec.display_name)
-    });
-    if let Err(error) = checked {
-        remove_all(&staged);
-        return Err(error);
+    let mut staged = Staged(Vec::new());
+    for (output, app) in outputs.iter().zip(&apps) {
+        let path = stage(out_dir, app, &mut staged.0)?;
+        verify(&path, output, &spec_bytes, &spec.display_name)?;
     }
 
-    for (index, (output, path)) in outputs.iter().zip(&staged).enumerate() {
-        if let Err(error) = fs::rename(path, &output.path) {
-            remove_all(&staged[index..]);
-            return Err(match index {
-                0 => PackError::Io {
-                    path: output.path.clone(),
-                    action: "replace",
-                    error,
-                },
-                _ => PackError::PartialPublish {
-                    updated: outputs[0].path.clone(),
-                    failed: output.path.clone(),
-                    error,
-                },
-            });
-        }
+    // Check again: specializing and verifying leave time for a file to
+    // appear at a target, and only generated apps may be replaced.
+    // shortcut: a file created in the instant between this check and the
+    // rename would still be replaced; closing that needs a no-replace rename
+    // (MoveFileExW without MOVEFILE_REPLACE_EXISTING, renameat2 NOREPLACE),
+    // which std lacks. Upgrade if other programs write into output folders.
+    for output in &mut outputs {
+        output.replaced = existing(&output.path, &spec.app_id)?;
     }
+    for (index, (output, path)) in outputs.iter().zip(&staged.0).enumerate() {
+        fs::rename(path, &output.path).map_err(|error| match index {
+            0 => PackError::Io {
+                path: output.path.clone(),
+                action: "replace",
+                error,
+            },
+            _ => PackError::PartialPublish {
+                updated: outputs[0].path.clone(),
+                failed: output.path.clone(),
+                error,
+            },
+        })?;
+    }
+    staged.0.clear(); // all published; nothing left to remove
     Ok(Generated {
         app_id: spec.app_id,
         slug: spec.slug,
@@ -169,6 +172,24 @@ fn existing(path: &Path, app_id: &str) -> Result<Replaced, PackError> {
     let Some(spec) = inspect(&bytes).ok().and_then(|report| report.spec) else {
         return Err(PackError::Foreign(path.to_path_buf()));
     };
+    // Windows refuses to replace a read-only file, which would otherwise
+    // surface only after the other architecture was already published.
+    if metadata.permissions().readonly() {
+        return Err(PackError::Io {
+            path: path.to_path_buf(),
+            action: "replace",
+            error: io::Error::new(io::ErrorKind::PermissionDenied, "it is read-only"),
+        });
+    }
+    // A running app cannot be replaced: Windows refuses the rename (pinned by
+    // tests/running_app.rs). Opening for write, without truncating, fails the
+    // same way and catches it before the other architecture is published.
+    if let Err(error) = OpenOptions::new().write(true).open(path) {
+        return Err(PackError::InUse {
+            path: path.to_path_buf(),
+            error,
+        });
+    }
     // Read leniently: an app from an older or newer generator still counts.
     let existing_id = serde_json::from_slice::<Value>(&spec)
         .ok()
@@ -251,8 +272,14 @@ fn verify(
     Ok(())
 }
 
-fn remove_all(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = fs::remove_file(path);
+/// Staging files, removed when dropped: covers every error path and panics.
+/// Published files are cleared from the list first.
+struct Staged(Vec<PathBuf>);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
     }
 }

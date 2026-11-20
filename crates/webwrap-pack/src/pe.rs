@@ -5,7 +5,6 @@ use editpe::constants::{CODE_PAGE_ID_EN_US, LANGUAGE_ID_EN_US, RT_RCDATA};
 use editpe::{
     Image, ResourceData, ResourceEntry, ResourceEntryName, ResourceTable, VersionStringTable,
 };
-use image::ImageFormat;
 
 use crate::PackError;
 
@@ -95,13 +94,7 @@ pub fn specialize_raw(
     display_name: &str,
     version: &str,
 ) -> Result<Vec<u8>, PackError> {
-    let icon =
-        image::load_from_memory_with_format(icon_png, ImageFormat::Png).map_err(|error| {
-            PackError::Input {
-                field: "icon",
-                reason: error.to_string(),
-            }
-        })?;
+    let icon = crate::spec::decode_icon(icon_png)?;
     let mut image = Image::parse(template).map_err(pe_error)?;
     let mut resources = image.resource_directory().cloned().unwrap_or_default();
 

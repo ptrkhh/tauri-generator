@@ -1,7 +1,8 @@
 #![allow(dead_code)] // each test file uses a different subset
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use image::{ImageFormat, Rgba, RgbaImage};
@@ -41,4 +42,20 @@ pub fn temp_dir(label: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+/// Every file in a folder, by name, with its bytes.
+pub fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let bytes = if entry.path().is_file() {
+                std::fs::read(entry.path()).unwrap()
+            } else {
+                vec![]
+            };
+            (entry.file_name().to_string_lossy().into_owned(), bytes)
+        })
+        .collect()
 }

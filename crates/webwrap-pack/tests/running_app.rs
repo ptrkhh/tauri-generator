@@ -5,12 +5,11 @@
 
 mod common;
 
-use std::fs;
 use std::process::Command;
 use std::time::Duration;
 
 use common::{png, temp_dir, template};
-use webwrap_pack::{generate, inspect, AppInput, Arch, Templates};
+use webwrap_pack::{generate, AppInput, Arch, PackError, Templates};
 use webwrap_spec::Adapter;
 
 #[test]
@@ -44,25 +43,20 @@ fn regenerating_over_a_running_app() {
         "the app exited before the probe"
     );
 
-    let before = fs::read(&path).unwrap();
+    let before = common::snapshot(&dir);
     let result = generate(&input, &png(64, [30, 136, 229, 255]), &dir, templates);
     let still_running = app.try_wait().unwrap().is_none();
-    let after = fs::read(&path).unwrap();
+    let after = common::snapshot(&dir);
     let _ = app.kill();
     let _ = app.wait();
 
-    println!(
-        "PROBE native={} result={:?} still_running={still_running} replaced={}",
-        native.suffix(),
-        result.as_ref().map(|_| ()).map_err(ToString::to_string),
-        before != after
-    );
-    // Whatever Windows decides, the file at the path is a complete app and
-    // the running one was not disturbed.
+    // Observed in CI on 2026-11-20: Windows refuses to rename over a running
+    // executable (os error 5, even with std's POSIX-semantics fallback). The
+    // generator must detect that before publishing either architecture.
     assert!(still_running, "regenerating killed the running app");
-    assert!(inspect(&after).unwrap().spec.is_some());
     match result {
-        Ok(_) => assert_ne!(before, after, "reported success but nothing changed"),
-        Err(_) => assert_eq!(before, after, "failed but the running app's file changed"),
+        Err(PackError::InUse { path: busy, .. }) => assert_eq!(busy, path),
+        other => panic!("expected InUse for {}, got {other:?}", path.display()),
     }
+    assert_eq!(before, after, "the folder changed");
 }

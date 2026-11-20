@@ -1,10 +1,9 @@
 mod common;
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::{png, temp_dir, template};
+use common::{png, snapshot, temp_dir, template};
 use webwrap_pack::{
     build_spec, generate, inspect, AppInput, Arch, Generated, PackError, Replaced, Templates,
 };
@@ -51,22 +50,6 @@ impl Fixture {
     ) -> Result<Generated, PackError> {
         generate(input, &png(64, colour), dir, self.templates())
     }
-}
-
-/// Every file in a folder, by name, with its bytes.
-fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
-    fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            let bytes = if entry.path().is_file() {
-                fs::read(entry.path()).unwrap()
-            } else {
-                vec![]
-            };
-            (entry.file_name().to_string_lossy().into_owned(), bytes)
-        })
-        .collect()
 }
 
 fn names(dir: &Path) -> Vec<String> {
@@ -264,4 +247,69 @@ fn a_missing_output_folder_is_an_input_error() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn a_read_only_generated_app_is_refused_before_anything_is_published() {
+    let fixture = Fixture::new();
+    let dir = temp_dir("readonly");
+    fixture
+        .generate(&input("twitter.com", "Twitter"), RED, &dir)
+        .unwrap();
+    let target = dir.join("twitter-arm64.exe");
+    let mut permissions = fs::metadata(&target).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&target, permissions.clone()).unwrap();
+    let before = snapshot(&dir);
+
+    let error = fixture
+        .generate(&input("twitter.com", "Twitter"), BLUE, &dir)
+        .unwrap_err();
+    assert!(
+        matches!(&error, PackError::Io { path, .. } if *path == target),
+        "{error}"
+    );
+    assert_eq!(snapshot(&dir), before, "the x64 app was published anyway");
+
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&target, permissions).unwrap();
+}
+
+#[test]
+fn a_file_that_appears_during_generation_is_never_replaced() {
+    let fixture = Fixture::new();
+    let dir = temp_dir("race");
+    let target = dir.join("twitter-x64.exe");
+    let foreign = b"a download that finished mid-generation".to_vec();
+
+    // Write the foreign file the moment staging begins, which is after the
+    // first check of the targets and before publishing.
+    let watcher = {
+        let (dir, target, foreign) = (dir.clone(), target.clone(), foreign.clone());
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                let staging = fs::read_dir(&dir).unwrap().any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".webwrap-")
+                });
+                if staging {
+                    fs::write(&target, &foreign).unwrap();
+                    return true;
+                }
+            }
+            false
+        })
+    };
+    let result = fixture.generate(&input("twitter.com", "Twitter"), RED, &dir);
+    assert!(watcher.join().unwrap(), "staging never started");
+
+    // Either generation saw the file and refused, or the file arrived after
+    // publishing; in both cases it must still be intact.
+    assert_eq!(fs::read(&target).unwrap(), foreign, "result was {result:?}");
+    assert!(!names(&dir).iter().any(|name| name.starts_with(".webwrap-")));
 }
