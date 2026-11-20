@@ -2,6 +2,13 @@
 
 Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](../specs/2026-11-20-file-bridge-and-adapters-design.md), section D3. It builds on D1's bridge and its page protocol, and follows D2's patterns: a local stand-in in CI, a live-site step, and a weekly run. Branch `feat/photopea-adapter`.
 
+## Status
+
+Tasks 1-5 are complete (2026-11-20). The evidence is `docs/evidence/2026-11-20-photopea-adapter.md`. The clarifications below are the deviations from the spec. Two things changed during implementation:
+
+- **Ctrl+O is automated through the dialog's classic controls.** UI Automation could not see its file-name box.
+- **Keyboard Ctrl+S is a PC check.** DevTools Ctrl+S never reaches Photopea's Save hook.
+
 ## Goal
 
 An app generated with `--adapter photopea` opens a file it is given, at launch or from a later launch, as a document in Photopea. Photopea's File > Save (Ctrl+S) writes the original file, for PSDs of 150 MB and more. Ctrl+O opens a file through the native Windows dialog, and it saves back the same way.

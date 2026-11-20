@@ -1,18 +1,17 @@
-# Next Windows run: D1 file plumbing and D2 vscode.dev, hands-on checks
+# Next Windows run: D1 file plumbing, D2 vscode.dev, D3 Photopea, hands-on checks
 
-Branch `feat/vscode-adapter`. Plans:
+Branch `feat/photopea-adapter`. Plans:
 
 - `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md` (D1, merged);
-- `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md` (D2).
+- `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md` (D2, merged);
+- `docs/superpowers/plans/2026-11-20-photopea-adapter.md` (D3).
 
-CI already drove both end to end on x64 and ARM64, including live vscode.dev. This run checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, and the Windows Open dialog. Nothing here needs a compiler.
-
-**Expect this:** a file handed to Photopea does **not** appear inside Photopea yet. That arrives with the Photopea adapter (D3). For Photopea, only the window behaviour is checked.
+CI already drove all three end to end on x64 and ARM64, including live vscode.dev and live Photopea with a 150 MB PSD. This run checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
 
 ## 1. Get the apps
 
 1. Find the CI run:
-   `gh run list --repo ptrkhh/tauri-generator --branch feat/vscode-adapter --workflow windows --status success --limit 5 --json databaseId,headSha,url`
+   `gh run list --repo ptrkhh/tauri-generator --branch feat/photopea-adapter --workflow windows --status success --limit 5 --json databaseId,headSha,url`
    Use the run whose `headSha` equals `git rev-parse HEAD`. If none does, stop and report "CI has not passed for this commit yet".
 2. Make a new empty folder `%TEMP%\webwrap-run-<timestamp>` and download this PC's artifact into it:
    - The artifact is `acceptance-aarch64-pc-windows-msvc` if `$env:PROCESSOR_ARCHITECTURE` is `ARM64`, otherwise `acceptance-x86_64-pc-windows-msvc`.
@@ -43,7 +42,7 @@ Close every Photopea, Twitter, and VS Code app window before starting.
 - **B. Also when minimized.** Ask me to minimize Photopea, then double-click `photopea-<arch>.exe` again. Expected: Photopea is restored and in front, and there is still one window.
 - **C. Dropping a file on the exe.** Ask me to drag `red.png` from Explorer onto `photopea-<arch>.exe`.
   - Expected: Photopea comes to the front, with no new window and no message box.
-  - The image does not open inside Photopea yet; that is expected.
+  - The image opens in Photopea as a new document named `red`.
 - **D. Dropping a file on the window.** Ask me to drag `red.png` from Explorer onto the open Photopea window. Expected: Photopea opens the image as a new document, as it would in a browser.
 - **E. A missing file is reported.**
   1. With Photopea still running, run `Start-Process <folder>\apps\photopea-<arch>.exe -ArgumentList 'C:\nope\missing.psd' -PassThru -Wait`.
@@ -85,6 +84,34 @@ Close every app before the vscode.dev checks.
   3. Ask me to read out the message box text word for word, then dismiss it. Expected: it names the file and says vscode.dev cannot use files in folders Windows keeps for apps.
   4. Expected: the file does not open in vscode.dev.
 
+Close every app before the Photopea checks.
+
+**D3: Photopea**
+
+Use a real PSD of your own, preferably a large one, copied into the Documents folder from step 5 as `mine.psd`. Record its size. If you have none, use `red.png` copied there as `mine.png`, and read `.png` for `.psd` below.
+
+- **L. A file given at launch opens.** Ask me to drag `mine.psd` onto `photopea-<arch>.exe`. Expected:
+  - Photopea opens it as a document named `mine`;
+  - an "Opened mine.psd" notice shows at the bottom right.
+
+  Record how many seconds it took.
+- **M. Ctrl+S from the keyboard saves the original.**
+  1. Ask me to make a small visible change, then press Ctrl+S with the keyboard.
+  2. Expected: "Saving mine.psd…", then "Saved mine.psd".
+  3. Check that `mine.psd`'s modified time changed, and that `%USERPROFILE%\Downloads\mine.psd` does not exist.
+  4. Ask me to reopen it (drag it onto the exe again) and confirm the change is there.
+  5. If Ctrl+S does nothing, ask me to use File > Save, and record that the keyboard did not work.
+- **N. Ctrl+O opens through the Windows dialog, and saves back.**
+  1. Ask me to press Ctrl+O, or use File > Open... if Ctrl+O does nothing, and record which worked.
+  2. Expected: a Windows Open dialog listing Photoshop documents.
+  3. Ask me to switch the file type to "All files", then pick `red.png` from the work folder. Expected: it opens as a new document.
+  4. Ask me to change it and save. Expected: "Saved red.png", and `red.png` changed.
+- **O. A document made in Photopea downloads.** Ask me to use File > New, draw something, and press Ctrl+S. Expected:
+  - a download of `Untitled-1.psd` (or similar) to Downloads;
+  - a "Downloaded" notice.
+
+  Delete the download afterwards.
+
 Close every app afterwards. Delete the Documents folder from step 5.
 
 ## 3. Extra results to record
@@ -92,3 +119,5 @@ Close every app afterwards. Delete the Documents folder from step 5.
 - The CI run id and URL you used.
 - For G, the seconds until the file opened.
 - For J, whether Ctrl+O itself opened the dialog, and any permission prompt.
+- For L, the file's size and the seconds until it opened.
+- For M and N, whether the keyboard shortcuts worked or the menu was needed.
