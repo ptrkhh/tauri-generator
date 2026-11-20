@@ -162,13 +162,20 @@ function pickInDialog(pid, file) {
     $edit = [System.Windows.Automation.ControlType]::Edit
     $button = [System.Windows.Automation.ControlType]::Button
     $fileName = Both (Where-Is $A::AutomationIdProperty '1148') (Where-Is $A::ControlTypeProperty $edit)
-    # The app's message boxes are dialogs too; the open dialog is the one
-    # with a file-name box.
+    # UI Automation lists an owned dialog under its owner window, so look
+    # under each of the app's windows. The app's message boxes are dialogs
+    # too; the open dialog is the one with a file-name box.
+    $mine = Where-Is $A::ProcessIdProperty ([int]$env:APP_PID)
+    $isDialog = Where-Is $A::ClassNameProperty '#32770'
     $deadline = (Get-Date).AddSeconds(30)
     $dialog = $null
     do {
-      $windows = $A::RootElement.FindAll($T::Children, (Both (Where-Is $A::ProcessIdProperty ([int]$env:APP_PID)) (Where-Is $A::ClassNameProperty '#32770')))
-      foreach ($window in $windows) { if ($window.FindFirst($T::Descendants, $fileName)) { $dialog = $window } }
+      foreach ($top in $A::RootElement.FindAll($T::Children, $mine)) {
+        $candidates = @($top) + @($top.FindAll($T::Children, $isDialog))
+        foreach ($window in $candidates) {
+          if ($window.Current.ClassName -eq '#32770' -and $window.FindFirst($T::Descendants, $fileName)) { $dialog = $window }
+        }
+      }
       if (-not $dialog) { Start-Sleep -Milliseconds 300 }
     } until ($dialog -or (Get-Date) -gt $deadline)
     if (-not $dialog) { throw 'no open dialog appeared' }
