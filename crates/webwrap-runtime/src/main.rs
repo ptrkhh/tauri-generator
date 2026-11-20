@@ -141,14 +141,16 @@ fn use_main_icon(hwnd: HWND) {
 const WRY_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
      --autoplay-policy=no-user-gesture-required";
 
-/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, added after wry's own arguments.
+/// `WEBWRAP_TEST_BROWSER_ARGUMENTS`, added after wry's own arguments. For
+/// tests only: the CI end-to-end run opens a DevTools port with it.
 ///
-/// WebView2 documents this variable for testing and diagnosis, but ignores it
-/// once an app passes arguments of its own, and wry always does. Honouring it
-/// here restores the documented behaviour; it gives nothing to a process that
-/// can set this app's environment that it did not already have.
+/// WebView2's own `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is ignored once an
+/// app passes arguments, and wry always does. A WebWrap-only name keeps it
+/// that way: someone who set WebView2's variable for their whole account to
+/// debug another app would otherwise open a DevTools port, reachable by other
+/// local users, on every generated app.
 fn browser_args_from_env() -> Option<String> {
-    let extra = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok()?;
+    let extra = std::env::var("WEBWRAP_TEST_BROWSER_ARGUMENTS").ok()?;
     let extra = extra.trim();
     (!extra.is_empty()).then(|| format!("{WRY_BROWSER_ARGS} {extra}"))
 }

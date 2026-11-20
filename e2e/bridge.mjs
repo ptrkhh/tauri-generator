@@ -89,14 +89,18 @@ function launch(exe, debugPort, args = []) {
       ...process.env,
       // Test only: a debugging port to drive the page, and acceptance of the
       // test server's self-signed certificate.
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort} --ignore-certificate-errors`,
+      WEBWRAP_TEST_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort} --ignore-certificate-errors`,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   child.log = '';
+  let partial = '';
   child.stderr.on('data', (chunk) => {
     child.log += chunk;
-    process.stdout.write(`  [${path.basename(exe)} ${child.pid}] ${chunk}`);
+    // Print whole lines only, so two apps' output never interleaves mid-line.
+    const lines = (partial + chunk).split('\n');
+    partial = lines.pop();
+    for (const line of lines) process.stdout.write(`  [${path.basename(exe)} ${child.pid}] ${line}\n`);
   });
   child.exitCode$ = new Promise((resolve) => child.on('exit', resolve));
   child.on('exit', (code) => process.stdout.write(`  [${path.basename(exe)} ${child.pid}] exited ${code}\n`));

@@ -1,6 +1,6 @@
 # WebWrap handover
 
-Updated 2026-11-20. The spikes and sub-projects A, B, and C are finished. A fresh Codex/Claude session should start here:
+Updated 2026-11-20. The spikes and sub-projects A, B, and C are finished, and D's first phase (D1) is done. A fresh Codex/Claude session should start here:
 
 - Work on `main` in the repository root. The `spike/photopea-windows-writeback` branch and its `.worktrees/photopea-windows-writeback` linked worktree were merged and removed; do not look for them.
 - Current code HEAD: check `git log -1 --format=%H` rather than trusting a hash recorded here, which goes stale as soon as the next commit lands.
@@ -57,7 +57,7 @@ The follow-on work was brainstormed on 2026-09-16. The Windows track is split in
 | A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | **done**, reviewed, 38 tests |
 | B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **done**, reviewed, 12 tests, Windows-verified |
 | C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (Windows half), 3 | **done**, reviewed, Windows-verified in CI |
-| D | File bridge and adapters | port both WebView2 bridges, Photopea and `vscode.dev`, single-instance IPC | 6, 7, 8, save half of 4 and 5 | **next**, not specced |
+| D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **in progress**: D1 done (6, 7, 8), reviewed, Windows-verified in CI; D2 next |
 | E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
 | F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
@@ -88,22 +88,37 @@ Spec: [`docs/superpowers/specs/2026-11-20-generator-packaging-core-design.md`](d
   - a killed generation leaves `.webwrap-*.tmp` files;
   - a file created in the instant before publishing can still be replaced.
 
-## Immediate next step: sub-project D, file bridge and adapters
+### Sub-project D1, done 2026-11-20
 
-D has no spec yet. Brainstorm and spec it first, then plan. It covers:
+Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md) (D is four phases; this is D1). Plan: [`docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md`](docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md). Evidence: [`docs/evidence/2026-11-20-file-bridge-plumbing.md`](docs/evidence/2026-11-20-file-bridge-plumbing.md). Branch `feat/file-bridge-plumbing`.
 
-- porting the two WebView2 spikes (`spikes/photopea-windows-writeback`, `spikes/vscode-webview2-handle`) into the runtime, and deleting them;
-- the Photopea and `vscode.dev` adapters;
-- identity-derived single-instance IPC.
+- **`crates/webwrap-bridge`** (cross-platform, tested on Linux) holds:
+  - the second-instance message codec;
+  - path rules;
+  - the token state machine: delivery only to a ready, trusted document; revocation on an untrusted document; one save per token, with a nonce.
+- **The runtime:**
+  - **Files and single instance.** Every non-`--inspect-self` argument is a file. A per-user, per-app named pipe makes the app single-instance, and a later launch forwards its files and brings the window forward.
+  - **Moving bytes.** Files reach the page through WebView2 shared buffers, and saves come back the same way and are written with `ReplaceFileW`.
+  - **Safety handlers.** They close B's four findings.
+- **The page protocol** in the plan is the contract D2-D4 build on. Page-to-host messages are JSON text **posted as a string**: wry's own handler fails on objects.
+- **CI end-to-end.** `e2e/bridge.mjs` drives two generated apps through the DevTools protocol and reads their `webwrap: <event>` stderr lines. The apps get their DevTools port from the test-only `WEBWRAP_TEST_BROWSER_ARGUMENTS`, because WebView2 ignores its own `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` once wry passes arguments.
+- **Known limits:** evidence section 6.
 
-Gates 6, 7, 8, and the save half of 4 and 5.
+## Immediate next step: D2, the `vscode.dev` adapter
 
-D inherits:
+Write D2's plan from the spec's D2 section. It ports `spikes/vscode-webview2-handle` onto D1's bridge, then deletes the spike:
 
-- B's four review findings (B evidence, section 6): pop-ups without a user gesture, the navigation hook failing open on unparseable URLs, iframes and `LaunchingExternalUriScheme`, and dropped-file arguments;
-- C's note that both architecture builds of one app share its storage folder, so the single-instance lock must span both.
+- create a read-write `FileSystemFileHandle` for the token's path;
+- post it to the page;
+- drive vscode.dev's Open File command;
+- verify Ctrl+S, and Ctrl+O through WebView2's own picker.
 
-Ctrl+S write-back needs the user's PC for a hands-on run (`docs/windows-runs/`).
+The live-site test joins the end-to-end step, and a weekly scheduled run guards against changes to `vscode.dev`. D3 (Photopea) and D4 (generic sites) follow.
+
+Still open from earlier sub-projects:
+
+- C's note that both architecture builds share one app's storage folder is handled: they share the pipe too.
+- Ctrl+S on real sites needs the user's PC for a hands-on run (`docs/windows-runs/`).
 
 ## How work runs now (since 2026-11-19)
 
@@ -117,6 +132,7 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
   - Runs fmt, both suites, and clippy `-D warnings` natively on `windows-latest` (x64) and `windows-11-arm` (ARM64).
   - Builds both release templates and the generator, generates the acceptance apps from `docs/windows-runs/fixtures/` icons, and uploads them, with the generator, as `acceptance-<triple>`.
   - Probes regenerating over a running app, and smoke-launches the native pair on real WebView2.
+  - Runs the file-bridge end-to-end test (`e2e/bridge.mjs`, Node 22, no dependencies) against two generated apps on a local HTTPS test page. On failure it prints the apps' state and WebView2's command lines, and uploads a desktop screenshot.
 - **The user's Windows PC:** hands-on checks only.
   - Paste the prompt in [`docs/windows-runs/README.md`](docs/windows-runs/README.md).
   - Queue a run by committing `docs/windows-runs/NEXT.md`. It reads that file, downloads the CI artifacts, asks the user what is on screen, and pushes `docs/windows-runs/<date>-results.md`.
@@ -127,6 +143,6 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
 
-Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. Gates 4, 5, 6, 7, and 8 belong to D and E, and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
+Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. Gates 4 and 5 belong to D2, D3, and E, and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
 
 One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.

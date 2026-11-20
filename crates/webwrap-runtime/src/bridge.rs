@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde_json::json;
 use tauri::WebviewWindow;
@@ -26,7 +27,7 @@ use webview2_com::{
 };
 use webwrap_bridge::{
     check_file, parse_page_message, AfterRead, Delivery, PageMessage, Refusal, Session,
-    MAX_FILE_BYTES,
+    LEAVING_TIMEOUT, MAX_FILE_BYTES,
 };
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
 
@@ -96,6 +97,7 @@ pub struct Bridge {
     /// the process exits when the window goes, which would kill the write.
     writing: Arc<AtomicUsize>,
     close_when_written: Arc<AtomicBool>,
+    recheck_scheduled: Arc<AtomicBool>,
 }
 
 /// What the page is told when a write fails. The reason, which names local
@@ -116,6 +118,7 @@ impl Bridge {
             session: Arc::new(Mutex::new(Session::new(trusted_origins))),
             writing: Arc::new(AtomicUsize::new(0)),
             close_when_written: Arc::new(AtomicBool::new(false)),
+            recheck_scheduled: Arc::new(AtomicBool::new(false)),
         };
         let installer = bridge.clone();
         window.with_webview(move |platform| {
@@ -324,6 +327,29 @@ impl Bridge {
                 self.delivery_failed(&delivery, error);
             }
         }
+        self.recheck_if_held();
+    }
+
+    /// If a pending untrusted navigation holds files back, look again once it
+    /// must have expired, in case WebView2 never reports that it ended.
+    fn recheck_if_held(&self) {
+        if !self.session().held() || self.recheck_scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        report::log("deliveries-held an untrusted navigation is pending");
+        let bridge = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(LEAVING_TIMEOUT + Duration::from_secs(1));
+            let window = bridge.window.clone();
+            let _ = window.run_on_main_thread(move || {
+                bridge.recheck_scheduled.store(false, Ordering::SeqCst);
+                let Some(live) = with_ui(|ui| live_source(&ui.webview)) else {
+                    return;
+                };
+                let released = bridge.session().release_held(&live);
+                bridge.start(released);
+            });
+        });
     }
 
     fn begin_read(&self, delivery: &Delivery) -> Result<(), String> {
@@ -463,6 +489,11 @@ impl Bridge {
                 .map_err(|error| format!("{} could not be saved.\n\n{error}", path.display()));
             let window = bridge.window.clone();
             let _ = window.run_on_main_thread(move || {
+                if written.is_err() {
+                    // Stay open: the user must see the failure, and the page
+                    // still holds the unsaved edits.
+                    bridge.close_when_written.store(false, Ordering::SeqCst);
+                }
                 bridge.finish_save(id, token, written);
                 let last = bridge.writing.fetch_sub(1, Ordering::SeqCst) == 1;
                 if last && bridge.close_when_written.load(Ordering::SeqCst) {
@@ -519,7 +550,9 @@ impl Bridge {
         let Some(live) = with_ui(|ui| live_source(&ui.webview)) else {
             return;
         };
-        if !self.session().may_post(&live) {
+        // Replies carry no file data, so a pending navigation does not hold
+        // them; holding could leave a page waiting forever for its result.
+        if !self.session().trusts(&live) {
             return;
         }
         with_ui(|ui| unsafe {

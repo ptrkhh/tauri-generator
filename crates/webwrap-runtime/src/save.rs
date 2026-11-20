@@ -63,15 +63,29 @@ pub fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// The `\\?\` form of an absolute path, which `ReplaceFileW` needs once a
+/// path passes 260 characters; the temporary and backup names can push a
+/// path just under the limit over it. std's own file calls add it themselves.
+fn verbatim(path: &Path) -> HSTRING {
+    let text = path.as_os_str().to_string_lossy();
+    if text.starts_with(r"\\?\") {
+        HSTRING::from(path.as_os_str())
+    } else if let Some(share) = text.strip_prefix(r"\\") {
+        HSTRING::from(format!(r"\\?\UNC\{share}"))
+    } else {
+        HSTRING::from(format!(r"\\?\{text}"))
+    }
+}
+
 fn swap_in(path: &Path, temp: &Path, dir: &Path) -> io::Result<()> {
     // Without a backup name, ERROR_UNABLE_TO_MOVE_REPLACEMENT leaves no file
     // at the original name at all. With one, the original keeps its name.
     let backup = unused_name(dir, "bak");
     let replaced = unsafe {
         ReplaceFileW(
-            &HSTRING::from(path.as_os_str()),
-            &HSTRING::from(temp.as_os_str()),
-            &HSTRING::from(backup.as_os_str()),
+            &verbatim(path),
+            &verbatim(temp),
+            &verbatim(backup.as_path()),
             REPLACEFILE_IGNORE_MERGE_ERRORS,
             None,
             None,
@@ -166,6 +180,23 @@ mod tests {
         permissions.set_readonly(false);
         fs::set_permissions(&path, permissions).unwrap();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_path_near_the_length_limit_still_saves() {
+        // The folder brings the file to about 250 characters, so the
+        // temporary and backup names next to it pass 260.
+        let mut dir = temp_dir("long");
+        while dir.as_os_str().len() < 240 {
+            dir.push("d".repeat(20));
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.psd");
+        fs::write(&path, b"8BPS old").unwrap();
+        replace(&path, b"8BPS new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"8BPS new");
+        assert_eq!(names(&dir), ["a.psd"]);
+        fs::remove_dir_all(temp_dir("long")).unwrap();
     }
 
     #[test]

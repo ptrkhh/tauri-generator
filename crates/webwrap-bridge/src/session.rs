@@ -5,14 +5,20 @@
 //! source and the live top-level source to be trusted origins, and a document
 //! must announce itself ready before anything is posted to it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use webwrap_spec::is_trusted_origin;
 
 use crate::paths::{display_name, MAX_FILE_BYTES};
+
+/// How long a pending untrusted navigation may hold deliveries back. It ends
+/// sooner when WebView2 reports the navigation finished or a new document; this
+/// is the backstop if that report never comes.
+pub const LEAVING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Page messages are tiny; anything larger is not ours and is not parsed.
 const MAX_PAGE_MESSAGE_BYTES: usize = 4096;
@@ -120,8 +126,10 @@ pub struct Session {
     ready: bool,
     next_save: u64,
     /// Allowed top-level navigations to untrusted origins that have neither
-    /// produced a document nor ended. Nothing is posted while any exists.
-    leaving: BTreeSet<u64>,
+    /// produced a document nor ended, with when each started. Nothing is
+    /// posted while one younger than `leaving_timeout` exists.
+    leaving: BTreeMap<u64, Instant>,
+    leaving_timeout: Duration,
 }
 
 impl Session {
@@ -133,7 +141,8 @@ impl Session {
             generation: 0,
             ready: false,
             next_save: 1,
-            leaving: BTreeSet::new(),
+            leaving: BTreeMap::new(),
+            leaving_timeout: LEAVING_TIMEOUT,
         }
     }
 
@@ -144,7 +153,34 @@ impl Session {
 
     /// Whether anything may be posted to a page at `url` right now.
     pub fn may_post(&self, url: &str) -> bool {
-        self.trusts(url) && self.leaving.is_empty()
+        self.trusts(url) && !self.leaving_pending()
+    }
+
+    fn leaving_pending(&self) -> bool {
+        self.leaving
+            .values()
+            .any(|started| started.elapsed() < self.leaving_timeout)
+    }
+
+    /// Files queued for a ready page and held back by a pending navigation.
+    /// The runtime checks again after `LEAVING_TIMEOUT`.
+    pub fn held(&self) -> bool {
+        self.ready
+            && self.leaving_pending()
+            && self
+                .entries
+                .values()
+                .any(|entry| entry.state == State::Queued)
+    }
+
+    /// Start whatever a pending navigation held back, if nothing holds it now.
+    pub fn release_held(&mut self, live: &str) -> Vec<Delivery> {
+        if self.ready && self.may_post(live) {
+            self.leaving.clear();
+            self.start_queued()
+        } else {
+            Vec::new()
+        }
     }
 
     fn check_sources(&self, source: &str, live: &str) -> Result<(), Refusal> {
@@ -179,10 +215,10 @@ impl Session {
     pub fn ready(&mut self, source: &str, live: &str) -> Result<Vec<Delivery>, Refusal> {
         self.check_sources(source, live)?;
         self.ready = true;
-        Ok(if self.leaving.is_empty() {
-            self.start_queued()
-        } else {
+        Ok(if self.leaving_pending() {
             Vec::new()
+        } else {
+            self.start_queued()
         })
     }
 
@@ -237,7 +273,7 @@ impl Session {
     /// That closes the gap between checking the source and posting.
     pub fn navigation_starting(&mut self, navigation: u64, url: &str) {
         if !self.trusts(url) {
-            self.leaving.insert(navigation);
+            self.leaving.insert(navigation, Instant::now());
         }
     }
 
@@ -245,11 +281,7 @@ impl Session {
     /// download. Returns deliveries that were held back and may start now.
     pub fn navigation_completed(&mut self, navigation: u64, live: &str) -> Vec<Delivery> {
         self.leaving.remove(&navigation);
-        if self.ready && self.may_post(live) {
-            self.start_queued()
-        } else {
-            Vec::new()
-        }
+        self.release_held(live)
     }
 
     /// A new top-level document is loading (WebView2 `ContentLoading`), before
@@ -262,7 +294,7 @@ impl Session {
     /// the trusted document in place and must not revoke its files.
     pub fn document_changed(&mut self, navigation: u64, url: &str) -> Navigated {
         // This navigation, and any older one it superseded, is over.
-        self.leaving.retain(|&id| id > navigation);
+        self.leaving.retain(|&id, _| id > navigation);
         self.generation += 1;
         self.ready = false;
         let trusted = self.trusts(url);
@@ -548,6 +580,20 @@ mod tests {
         // A trusted navigation never holds anything back.
         s.navigation_starting(8, "https://app.test/next");
         assert!(s.may_post(HOME));
+    }
+
+    #[test]
+    fn a_navigation_that_never_reports_back_stops_holding_after_the_timeout() {
+        let mut s = session();
+        s.open(path("a.psd"), HOME);
+        s.navigation_starting(7, AWAY);
+        assert!(s.ready(HOME, HOME).unwrap().is_empty());
+        assert!(s.held());
+        assert!(s.release_held(HOME).is_empty());
+        // No completion and no new document ever arrive for navigation 7.
+        s.leaving_timeout = Duration::ZERO;
+        assert!(!s.held());
+        assert_eq!(s.release_held(HOME).len(), 1);
     }
 
     #[test]

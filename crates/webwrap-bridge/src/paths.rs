@@ -13,13 +13,15 @@ pub const MAX_FILE_BYTES: u64 = 4 << 30;
 /// current directory reads the same file. Paths over 260 characters keep the
 /// `\\?\` prefix, which Win32 file calls need for them.
 pub fn resolve(arg: &OsStr) -> Result<PathBuf, String> {
-    let path = dunce::canonicalize(Path::new(arg)).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            "it does not exist".to_string()
-        } else {
-            error.to_string()
+    let path = match dunce::canonicalize(Path::new(arg)) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("it does not exist".into());
         }
-    })?;
+        // Some volumes (RAM disks, some virtual drives) cannot canonicalize.
+        // Their files still open, without symlink resolution.
+        Err(_) => std::path::absolute(Path::new(arg)).map_err(|error| error.to_string())?,
+    };
     // The forwarding message is JSON, which cannot carry a non-Unicode name.
     if path.to_str().is_none() {
         return Err("its name is not valid Unicode".into());

@@ -11,4 +11,5 @@ pub use ipc::{encode_request, read_request, IpcError, MAX_MESSAGE_BYTES};
 pub use paths::{check_file, display_name, resolve, MAX_FILES, MAX_FILE_BYTES};
 pub use session::{
     parse_page_message, AfterRead, Delivery, Navigated, PageMessage, Refusal, Session,
+    LEAVING_TIMEOUT,
 };

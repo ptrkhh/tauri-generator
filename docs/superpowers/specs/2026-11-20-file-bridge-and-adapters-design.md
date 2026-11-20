@@ -1,6 +1,6 @@
 # File Bridge and Adapters Design (sub-project D)
 
-Date: 2026-11-20. Status: decisions agreed with the user; awaiting their review before the first phase plan is written.
+Date: 2026-11-20. Status: approved by the user 2026-11-20. D1 is implemented (plan `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md`, evidence `docs/evidence/2026-11-20-file-bridge-plumbing.md`); D2-D4 are next.
 
 ## Summary
 

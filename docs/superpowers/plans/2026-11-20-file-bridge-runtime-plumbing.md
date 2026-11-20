@@ -4,7 +4,7 @@ Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](.
 
 ## Status
 
-Not started.
+Tasks 1-6 are complete (2026-11-20). The evidence is `docs/evidence/2026-11-20-file-bridge-plumbing.md`; the clarifications below are the deviations from the spec.
 
 ## Global constraints
 
@@ -27,7 +27,7 @@ These are decided here; the evidence will list them as deviations.
 7. **Files dropped on the window reach the site.** Tauri's drag-and-drop interception is switched off, so a site receives the drop exactly as in a browser, open-only. Today a drop does nothing at all.
 8. **A second launch checks who owns the pipe before sending anything.** The pipe's owner is set explicitly to the user, which another user cannot forge. If the owner differs, the launch sends nothing and runs on its own. This closes a pipe pre-created by another user (review finding).
 9. **Opened paths are canonical** (`dunce::canonicalize`), so saving a symlinked file replaces the target, not the link, and paths over 260 characters keep the `\\?\` prefix `ReplaceFileW` needs.
-10. **The runtime honours `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` itself.** WebView2 ignores the variable once an app passes browser arguments of its own, and wry always does; CI saw the browser process start without the test's flags. The runtime appends the variable to wry's defaults, which restores WebView2's documented behaviour. It gives a process that can set the app's environment nothing it did not already have.
+10. **Tests pass browser arguments through `WEBWRAP_TEST_BROWSER_ARGUMENTS`.** WebView2 ignores its own `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` once an app passes arguments, and wry always does; CI saw the browser process start without the test's flags. The runtime appends the WebWrap-only variable to wry's defaults. It deliberately does not honour WebView2's generic name: someone who set that for their whole account to debug another app would otherwise open a DevTools port, reachable by other local users, on every generated app.
 
 ## The page protocol
 
@@ -152,7 +152,7 @@ Tests (Wine and CI):
 ## Task 5: end-to-end in CI
 
 - **`e2e/cdp.mjs`.** A minimal DevTools-protocol client over Node 22's global `WebSocket`. It finds the page target from `/json/list`, then provides `send`, `evaluate`, and an event wait.
-- **`e2e/bridge.mjs`** serves one test page over HTTPS on ports 8443 and 8444. The PFX is made by the workflow with `New-SelfSignedCertificate`, and the apps run with `--ignore-certificate-errors` in `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, test only. It launches the generated apps `bridge-a` (`https://localhost:8443/`) and `bridge-b` (`https://localhost:8444/`), each with its own `--remote-debugging-port`, and captures stderr. Cases:
+- **`e2e/bridge.mjs`** serves one test page over HTTPS on ports 8443 and 8444. The PFX is made by the workflow with `New-SelfSignedCertificate`, and the apps run with `--ignore-certificate-errors` in `WEBWRAP_TEST_BROWSER_ARGUMENTS` (clarification 10), test only. It launches the generated apps `bridge-a` (`https://localhost:8443/`) and `bridge-b` (`https://localhost:8444/`), each with its own `--remote-debugging-port`, and captures stderr. Cases:
   1. **Startup file:** A launched with a file delivers it after `ready`, with the bytes intact.
   2. **Gate 6:** a second launch of A with a file exits 0, and the running A receives it.
   3. **Gate 7:** with A and B running, B's file reaches only B.

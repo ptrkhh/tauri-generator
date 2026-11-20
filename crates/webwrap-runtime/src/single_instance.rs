@@ -40,6 +40,7 @@ const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY_CODE: i32 = 231;
+const ERROR_ACCESS_DENIED_CODE: i32 = 5;
 
 pub enum Role {
     /// This process owns the app. The handle is the listening pipe.
@@ -228,8 +229,14 @@ pub fn forward(app_id: &str, files: &[PathBuf]) -> Result<Forwarded, String> {
     let frame = encode_request(app_id, files).map_err(|error| error.to_string())?;
     let sid = user_sid().map_err(|error| error.to_string())?;
     let name = pipe_name(app_id, &sid);
-    let mut pipe = open_pipe(&name, Instant::now() + TIMEOUT)
-        .map_err(|error| format!("the running app could not be reached: {error}"))?;
+    let mut pipe = match open_pipe(&name, Instant::now() + TIMEOUT) {
+        Ok(pipe) => pipe,
+        // Our own pipe always admits us; one that refuses us is someone else's.
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED_CODE) => {
+            return Ok(Forwarded::NotOurs);
+        }
+        Err(error) => return Err(format!("the running app could not be reached: {error}")),
+    };
     if !owned_by(&pipe, &sid) {
         return Ok(Forwarded::NotOurs);
     }
