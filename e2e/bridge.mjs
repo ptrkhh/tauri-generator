@@ -343,12 +343,12 @@ async function checkVscodeAdapter() {
       'ProgramData': process.env.ProgramData,
       'over 260 characters': path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`)),
     };
-    const allowed = { 'Documents': path.join(home, 'Documents'), 'home folder': home };
     // A network share, as mapped drives and redirected folders are: the
     // runner's own administrative share, if it has one.
     const share = `\\\\localhost\\${outside[0]}$${outside.slice(2)}`;
-    if (fs.existsSync(share)) allowed['network share'] = share;
+    if (fs.existsSync(share)) refused['network share'] = share;
     else process.stdout.write(`  (no administrative share at ${share}; the share case is skipped)\n`);
+    const allowed = { 'Documents': path.join(home, 'Documents'), 'home folder': home };
     const place = ([where, dir], i, prefix) => {
       fs.mkdirSync(dir, { recursive: true });
       return { where, file: makeFile(`${prefix}-${i}.md`, `${prefix} ${i}`, dir) };
@@ -359,7 +359,7 @@ async function checkVscodeAdapter() {
       await forward(APP_C, DEBUG_C, ...no.map((p) => p.file), ...yes.map((p) => p.file));
       for (const { where, file } of no) {
         const name = path.basename(file).replace('.', '\\.');
-        await logged(c, new RegExp(`open-failed ${name}: vscode\\.dev cannot use files in folders Windows keeps`), `${where} refused`);
+        await logged(c, new RegExp(`open-failed ${name}: vscode\\.dev cannot use files`), `${where} refused`);
       }
       for (const { where, file } of yes) {
         const name = path.basename(file);

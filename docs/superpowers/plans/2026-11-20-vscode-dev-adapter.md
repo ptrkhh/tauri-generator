@@ -55,8 +55,8 @@ Read from the live workbench bundle (`workbench.web.main.internal.js`, build `8a
    - Measured in CI (run 44771559248, both architectures). A handle WebView2 creates is refused by its own security check, for reading or writing, inside `%LOCALAPPDATA%` (including `%TEMP%`), `%APPDATA%`, and `%ProgramData%`, and for paths over 260 characters. Documents, the home folder, and other folders work.
    - So the runtime refuses those files with a message box, saying to copy the file to Documents. Otherwise vscode.dev would show a cryptic security error.
    - It also refuses Program Files and Windows, which Chromium blocks too. Those were not measured.
-   - `webwrap_bridge::handle_refusal` does the check, with a reason for each case. `protected_folders` reads the folders from the environment.
-   - Length is counted without the `\\?\` prefix. Canonical paths keep that prefix on every network share (`\\?\UNC\…`), so `handle_path` gives WebView2 the plain `\\server\share\…` form. CI measures a share through the runner's administrative share.
+   - Network shares are refused too. Run 44776082951 measured `\\localhost\D$\…` on both architectures: reading the handle raised `SecurityError`.
+   - `webwrap_bridge::handle_refusal` does the check, with a reason for each case. `protected_folders` reads the folders from the environment. Length is counted without the `\\?\` prefix, which canonical paths keep on long local paths.
 7. **Ctrl+O needs no code.** With nothing queued, the script passes `showOpenFilePicker` through to WebView2's native picker. The hands-on PC run checks that it saves back. CI cannot drive the Windows dialog reliably.
 8. **The live test runs on every push and weekly.**
    - A separate CI step runs it, so a vscode.dev outage reads as that step failing, not the bridge.

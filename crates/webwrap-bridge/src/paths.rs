@@ -86,38 +86,36 @@ const PROTECTED_FOLDER_VARIABLES: [&str; 7] = [
 ];
 
 /// Why WebView2 would refuse a site's file handle for `path`, if it would:
-/// inside one of the `protected` folders, or a path of 260 characters or
-/// more. Both were measured in CI (D2 evidence). Case is ignored, as Windows
-/// does.
+/// on a network share, inside one of the `protected` folders, or 260
+/// characters or longer. All three were measured in CI (D2 evidence). Case
+/// is ignored, as Windows does.
 pub fn handle_refusal(path: &Path, protected: &[PathBuf]) -> Option<&'static str> {
-    let plain = handle_path(path);
-    if plain.to_string_lossy().encode_utf16().count() >= 260 {
+    let text = path.to_string_lossy();
+    // Canonical paths keep `\\?\` on every share (`\\?\UNC\…`) and on long
+    // local paths; the length that matters is without it.
+    let local = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    if local.starts_with(r"\\") || local.starts_with(r"UNC\") {
+        return Some(
+            "vscode.dev cannot use files on network shares or mapped network drives. \
+             Copy the file to a folder on this PC, such as Documents, and open the copy.",
+        );
+    }
+    if local.encode_utf16().count() >= 260 {
         return Some(
             "vscode.dev cannot use files whose full path is 260 characters or longer. \
              Copy the file to a folder with a shorter path, such as Documents, and open the copy.",
         );
     }
     let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
-    let plain = lower(&plain);
+    let path = lower(path);
     protected
         .iter()
         .filter(|root| root.is_absolute())
-        .any(|root| plain.starts_with(lower(root)))
+        .any(|root| path.starts_with(lower(root)))
         .then_some(
             "vscode.dev cannot use files in folders Windows keeps for apps, such as AppData. \
              Copy the file to another folder, such as Documents, and open the copy.",
         )
-}
-
-/// `path` as WebView2 should get it. Canonical paths keep the `\\?\` prefix
-/// on every network share, short or not, and on long local paths.
-pub fn handle_path(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
-        (Some(share), _) => PathBuf::from(format!(r"\\{share}")),
-        (None, Some(local)) => PathBuf::from(local),
-        (None, None) => path.to_path_buf(),
-    }
 }
 
 #[cfg(test)]
@@ -189,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn handles_are_refused_inside_protected_folders_and_for_long_paths() {
+    fn handles_are_refused_on_shares_inside_protected_folders_and_for_long_paths() {
         let base = std::env::temp_dir();
         let protected = [
             base.join("Users/Me/AppData/Local"),
@@ -202,27 +200,17 @@ mod tests {
         // Whole folder names only, and a relative entry protects nothing.
         assert!(refused(base.join("Users/Me/AppData/LocalCopy/a.md")).is_none());
         assert!(refused(base.join("relative/a.md")).is_none());
-        // Length counts without the prefix, so a short share is fine.
+        // Length is counted without the prefix.
         let long = format!(r"\\?\C:\{}\a.md", "x".repeat(260));
         assert!(refused(PathBuf::from(long)).unwrap().contains("260"));
-        assert!(refused(PathBuf::from(r"\\?\UNC\server\share\a.md")).is_none());
-        let long_share = format!(r"\\?\UNC\server\share\{}\a.md", "x".repeat(250));
-        assert!(refused(PathBuf::from(long_share)).is_some());
-    }
-
-    #[test]
-    fn webview2_gets_shares_and_short_paths_without_the_verbatim_prefix() {
-        assert_eq!(
-            handle_path(Path::new(r"\\?\UNC\server\share\a.md")),
-            PathBuf::from(r"\\server\share\a.md")
-        );
-        assert_eq!(
-            handle_path(Path::new(r"\\?\C:\a.md")),
-            PathBuf::from(r"C:\a.md")
-        );
-        assert_eq!(
-            handle_path(Path::new(r"C:\a.md")),
-            PathBuf::from(r"C:\a.md")
-        );
+        let short = format!(r"\\?\C:\{}\a.md", "x".repeat(200));
+        assert!(refused(PathBuf::from(short)).is_none());
+        // Shares, however short, and however spelled.
+        for share in [r"\\?\UNC\server\share\a.md", r"\\server\share\a.md"] {
+            assert!(
+                refused(PathBuf::from(share)).unwrap().contains("network"),
+                "{share}"
+            );
+        }
     }
 }

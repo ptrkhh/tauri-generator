@@ -26,8 +26,8 @@ use webview2_com::{
     NavigationStartingEventHandler, WebMessageReceivedEventHandler,
 };
 use webwrap_bridge::{
-    check_file, handle_path, handle_refusal, parse_page_message, protected_folders, AfterRead,
-    Delivery, PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
+    check_file, handle_refusal, parse_page_message, protected_folders, AfterRead, Delivery,
+    PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
 };
 use webwrap_spec::Adapter;
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
@@ -479,8 +479,7 @@ impl Bridge {
         with_ui(|ui| {
             let environment = ui.environment.cast()?;
             let webview = ui.webview.cast()?;
-            let path = handle_path(&delivery.path);
-            vscode::post_handle(&environment, &webview, &path, &message.to_string())
+            vscode::post_handle(&environment, &webview, &delivery.path, &message.to_string())
         })
         .ok_or("the window is gone")?
         .map_err(|error| error.to_string())?;
