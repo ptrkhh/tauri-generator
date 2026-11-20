@@ -79,8 +79,13 @@ mod tests {
         let dir = temp_dir("file");
         let file = dir.join("a.psd");
         std::fs::write(&file, b"8BPS").unwrap();
-        let canonical = std::fs::canonicalize(&file).unwrap();
-        assert_eq!(resolve(file.as_os_str()).unwrap(), canonical);
+        let resolved = resolve(file.as_os_str()).unwrap();
+        assert_eq!(resolved, dunce::canonicalize(&file).unwrap());
+        // A short path stays in the plain form users and dialogs show.
+        assert!(
+            !resolved.to_string_lossy().starts_with(r"\\?\"),
+            "{resolved:?}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -94,7 +99,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert_eq!(
             resolve(link.as_os_str()).unwrap(),
-            std::fs::canonicalize(&target).unwrap()
+            dunce::canonicalize(&target).unwrap()
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

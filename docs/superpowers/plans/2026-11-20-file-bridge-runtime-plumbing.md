@@ -21,12 +21,12 @@ These are decided here; the evidence will list them as deviations.
 1. **No mutex.** The named pipe is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, which already fails atomically for every process but the first. So the pipe is both the lock and the endpoint. Both architecture builds still share it, because the name comes from `appId`.
 2. **A second launch with no files brings the running window to the front** and exits. It sends an empty `files` list, which the receiver accepts as "activate". Otherwise a no-file launch would open a second window that owns nothing.
 3. **The acknowledgement byte is `1` for accepted and `0` for rejected.** So a rejected request is reported at once, not after the 5 s timeout.
-4. **Files not yet delivered survive navigation to an untrusted origin.** They were never exposed to any page, and a sign-in redirect would otherwise drop the file the user just opened. They are still delivered only to a trusted document. Every **delivered** token, and every save in flight, is revoked as the spec says.
+4. **Files not yet delivered survive navigation to an untrusted origin.** They were never exposed to any page, and a sign-in redirect would otherwise drop the file the user just opened. They are still delivered only to a trusted document. Every **delivered** token, and every save not yet committed, is revoked as the spec says. A write the trusted page committed before it left still completes: those bytes came from the trusted page.
 5. **The frame scheme allowlist also admits `blob:` and `data:`.** Neither can launch an external application, and sites embed such frames. `LaunchingExternalUriScheme` is still always cancelled.
 6. **`fileTier` in `--inspect-self` moves to D4**, where the tiers exist.
+7. **Files dropped on the window reach the site.** Tauri's drag-and-drop interception is switched off, so a site receives the drop exactly as in a browser, open-only. Today a drop does nothing at all.
 8. **A second launch checks who owns the pipe before sending anything.** The pipe's owner is set explicitly to the user, which another user cannot forge. If the owner differs, the launch sends nothing and runs on its own. This closes a pipe pre-created by another user (review finding).
 9. **Opened paths are canonical** (`dunce::canonicalize`), so saving a symlinked file replaces the target, not the link, and paths over 260 characters keep the `\\?\` prefix `ReplaceFileW` needs.
-7. **Files dropped on the window reach the site.** Tauri's drag-and-drop interception is switched off, so a site receives the drop exactly as in a browser, open-only. Today a drop does nothing at all.
 
 ## The page protocol
 
