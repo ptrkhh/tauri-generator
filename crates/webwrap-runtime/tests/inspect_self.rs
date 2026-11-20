@@ -180,12 +180,12 @@ fn an_unspecialized_template_refuses_to_run() {
     );
 }
 
+/// Without `--inspect-self` every argument is a file to open (sub-project D),
+/// which launches the window, so only inspect mode has usage errors.
 #[test]
-fn unknown_arguments_are_a_usage_error() {
+fn malformed_inspect_arguments_are_a_usage_error() {
     let exe = specialize_fixture(PHOTOPEA_SPEC, "Photopea", "1.0.0");
     for args in [
-        vec!["--nonsense"],
-        vec!["some-file.psd"],
         vec!["--inspect-self", "--check-url"],
         vec!["--inspect-self", "--check-url", "--nonsense"],
         vec!["--inspect-self", "extra"],
@@ -201,7 +201,14 @@ fn unknown_arguments_are_a_usage_error() {
     // A lone UTF-16 surrogate is a valid Windows argument but not a String.
     use std::os::windows::ffi::OsStringExt;
     let lone_surrogate = std::ffi::OsString::from_wide(&[0xD800]);
-    let out = Command::new(&exe).arg(lone_surrogate).output().unwrap();
+    let out = Command::new(&exe)
+        .args([
+            "--inspect-self".into(),
+            "--check-url".into(),
+            lone_surrogate,
+        ])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(2), "non-Unicode argument");
 }
 

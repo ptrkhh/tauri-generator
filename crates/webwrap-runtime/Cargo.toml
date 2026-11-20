@@ -10,12 +10,21 @@ tauri-build = "=2.6.3"
 [dependencies]
 serde_json = "=1.0.151"
 tauri = "=2.11.5"
+webwrap-bridge = { path = "../webwrap-bridge" }
 webwrap-spec = { path = "../webwrap-spec" }
 
 [target.'cfg(windows)'.dependencies]
+# Already in the tree through wry; named here for the raw WebView2 handlers.
+webview2-com = "=0.38.2"
 windows = { version = "=0.61.3", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
