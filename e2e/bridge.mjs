@@ -58,7 +58,7 @@ const RECEIVER = `(() => {
       ww.files.push({ token: info.token, name: info.name, size: info.size, sha256 });
     } else if (info.type === 'webwrap-save-buffer') {
       new Uint8Array(buffer).set(ww.pending[info.token]);
-      chrome.webview.postMessage({ type: 'webwrap-save-commit', token: info.token });
+      chrome.webview.postMessage({ type: 'webwrap-save-commit', token: info.token, save: info.save });
     }
     chrome.webview.releaseBuffer(buffer);
   });
@@ -93,6 +93,7 @@ function launch(exe, debugPort, args = []) {
     process.stdout.write(`  [${path.basename(exe)} ${child.pid}] ${chunk}`);
   });
   child.exitCode$ = new Promise((resolve) => child.on('exit', resolve));
+  child.on('exit', (code) => process.stdout.write(`  [${path.basename(exe)} ${child.pid}] exited ${code}\n`));
   children.push(child);
   return child;
 }
@@ -126,6 +127,27 @@ async function check(name, body) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+/** Saving must never leave its temporary or backup files behind. */
+function noLeftovers() {
+  const left = fs.readdirSync(work).filter((name) => name.startsWith('.webwrap-'));
+  assert(left.length === 0, `left behind: ${left.join(', ')}`);
+}
+
+/** What a failure report needs: which apps still run, and WebView2's flags. */
+function diagnose() {
+  for (const child of children) {
+    process.stdout.write(`  app ${child.pid}: exit ${child.exitCode ?? 'still running'}\n`);
+  }
+  try {
+    const script = "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | " +
+      "Where-Object { $_.CommandLine -notmatch '--type=' } | Select-Object ProcessId, CommandLine | Format-List | Out-String -Width 4000";
+    process.stdout.write(execFileSync('powershell', ['-NoProfile', '-Command', script]).toString());
+    process.stdout.write(execFileSync('netstat', ['-ano']).toString().split('\n').filter((l) => /:930[12]\b/.test(l)).join('\n') + '\n');
+  } catch (error) {
+    process.stdout.write(`  (diagnostics failed: ${error.message})\n`);
+  }
 }
 
 async function main() {
@@ -165,6 +187,7 @@ async function main() {
     const reply = await result(pageA, forwarded.token);
     assert(reply.ok === true, `save failed: ${JSON.stringify(reply)}`);
     assert(fs.readFileSync(path.join(work, 'forwarded.txt'), 'utf8') === 'edited in the page', 'file not changed');
+    noLeftovers();
   });
 
   await check('a 160 MiB file opens and a 150 MiB save writes back, byte for byte', async () => {
@@ -179,6 +202,7 @@ async function main() {
     const reply = await until(() => pageA.evaluate(`__ww.results.find((r) => r.token === ${JSON.stringify(file.token)})`), 'big save', 120000);
     assert(reply.ok === true, `big save failed: ${JSON.stringify(reply)}`);
     assert(sha256(fs.readFileSync(bigPath)) === sha256(pattern), 'big.bin on disk is not the saved content');
+    noLeftovers();
   });
 
   await check('a save that cannot be written reports failure and leaves the file alone', async () => {
@@ -191,7 +215,9 @@ async function main() {
     fs.chmodSync(lockedPath, 0o666);
     assert(reply.ok === false, 'a read-only save reported success');
     assert(fs.readFileSync(lockedPath, 'utf8') === 'original', 'the read-only file changed');
+    assert(!/[A-Za-z]:\\/.test(reply.error), `the page was told a local path: ${reply.error}`);
     await logged(a, /save-failed/, 'save-failed in the log');
+    noLeftovers();
   });
 
   await check('malformed pipe messages are rejected and the app keeps serving', async () => {
@@ -284,6 +310,7 @@ try {
 } catch (error) {
   failed = true;
   process.stdout.write(`FAIL: ${error.stack}\n`);
+  diagnose();
 } finally {
   for (const child of children) child.kill();
   fs.rmSync(work, { recursive: true, force: true });

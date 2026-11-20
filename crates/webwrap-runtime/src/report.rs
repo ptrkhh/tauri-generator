@@ -36,6 +36,9 @@ pub fn log(message: impl Display) {
 /// and pipelines can read the reason.
 pub fn abort(message: &str, interactive: bool) -> ! {
     if interactive {
+        // Logged first: the box blocks, and a parent watching stderr (the CI
+        // end-to-end test) would otherwise see a silent, running process.
+        log(format_args!("fatal {message}"));
         error_box(message);
     } else {
         eprintln!("{message}");

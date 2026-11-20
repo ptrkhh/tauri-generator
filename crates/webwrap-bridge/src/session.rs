@@ -5,7 +5,7 @@
 //! source and the live top-level source to be trusted origins, and a document
 //! must announce itself ready before anything is posted to it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -24,8 +24,10 @@ pub enum PageMessage {
     Ready,
     #[serde(rename = "webwrap-save")]
     Save { token: String, size: u64 },
+    /// `save` echoes the number in `webwrap-save-buffer`, so a late commit
+    /// can never fill in for a different save of the same file.
     #[serde(rename = "webwrap-save-commit")]
-    SaveCommit { token: String },
+    SaveCommit { token: String, save: u64 },
 }
 
 /// Parse the JSON a page posted with `chrome.webview.postMessage`. Anything
@@ -50,7 +52,8 @@ pub struct Delivery {
 pub enum AfterRead {
     /// Post it now.
     Post,
-    /// Do not post: the document changed. The file is queued again, and these
+    /// Do not post: the document changed, or is about to change to an
+    /// untrusted origin. The file is queued again, and these
     /// deliveries (possibly none) should be started instead.
     Retry(Vec<Delivery>),
 }
@@ -88,7 +91,7 @@ impl fmt::Display for Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Save {
     Idle,
-    AwaitingCommit { generation: u64 },
+    AwaitingCommit { generation: u64, nonce: u64 },
     Writing,
 }
 
@@ -114,6 +117,10 @@ pub struct Session {
     generation: u64,
     /// The current document said `webwrap-ready`.
     ready: bool,
+    next_save: u64,
+    /// Allowed top-level navigations to untrusted origins that have neither
+    /// produced a document nor ended. Nothing is posted while any exists.
+    leaving: BTreeSet<u64>,
 }
 
 impl Session {
@@ -124,12 +131,19 @@ impl Session {
             next_token: 1,
             generation: 0,
             ready: false,
+            next_save: 1,
+            leaving: BTreeSet::new(),
         }
     }
 
     /// Whether a page at `url` may receive files or be told about them.
     pub fn trusts(&self, url: &str) -> bool {
         is_trusted_origin(&self.trusted_origins, url)
+    }
+
+    /// Whether anything may be posted to a page at `url` right now.
+    pub fn may_post(&self, url: &str) -> bool {
+        self.trusts(url) && self.leaving.is_empty()
     }
 
     fn check_sources(&self, source: &str, live: &str) -> Result<(), Refusal> {
@@ -153,7 +167,7 @@ impl Session {
                 state: State::Queued,
             },
         );
-        if self.ready && self.trusts(live) {
+        if self.ready && self.may_post(live) {
             self.start_queued()
         } else {
             Vec::new()
@@ -164,7 +178,11 @@ impl Session {
     pub fn ready(&mut self, source: &str, live: &str) -> Result<Vec<Delivery>, Refusal> {
         self.check_sources(source, live)?;
         self.ready = true;
-        Ok(self.start_queued())
+        Ok(if self.leaving.is_empty() {
+            self.start_queued()
+        } else {
+            Vec::new()
+        })
     }
 
     fn start_queued(&mut self) -> Vec<Delivery> {
@@ -186,18 +204,18 @@ impl Session {
     /// A delivery's bytes are ready. Decide immediately before posting.
     pub fn delivery_read(&mut self, token: u64, live: &str) -> AfterRead {
         let current = self.generation;
-        let trusted = self.trusts(live);
+        let postable = self.may_post(live);
         let Some(entry) = self.entries.get_mut(&token) else {
             return AfterRead::Retry(Vec::new());
         };
         match entry.state {
-            State::Delivering { generation } if generation == current && trusted => {
+            State::Delivering { generation } if generation == current && postable => {
                 entry.state = State::Delivered(Save::Idle);
                 AfterRead::Post
             }
             State::Delivering { .. } => {
                 entry.state = State::Queued;
-                if self.ready && trusted {
+                if self.ready && postable {
                     AfterRead::Retry(self.start_queued())
                 } else {
                     AfterRead::Retry(Vec::new())
@@ -212,6 +230,27 @@ impl Session {
         self.entries.remove(&token);
     }
 
+    /// A top-level navigation was allowed to start. WebView2 holds it until
+    /// every `NavigationStarting` handler returns, so this runs before the new
+    /// document can exist, while the live source may still read as trusted.
+    /// That closes the gap between checking the source and posting.
+    pub fn navigation_starting(&mut self, navigation: u64, url: &str) {
+        if !self.trusts(url) {
+            self.leaving.insert(navigation);
+        }
+    }
+
+    /// A navigation ended: loaded, failed, cancelled, or turned into a
+    /// download. Returns deliveries that were held back and may start now.
+    pub fn navigation_completed(&mut self, navigation: u64, live: &str) -> Vec<Delivery> {
+        self.leaving.remove(&navigation);
+        if self.ready && self.may_post(live) {
+            self.start_queued()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// A new top-level document is loading (WebView2 `ContentLoading`), before
     /// any of its scripts run. It must announce itself again, uncommitted saves
     /// are dropped, and a document outside the trusted origins revokes every
@@ -220,7 +259,9 @@ impl Session {
     /// This is keyed on the document actually changing, not on a navigation
     /// starting: a navigation that becomes a download, or is cancelled, leaves
     /// the trusted document in place and must not revoke its files.
-    pub fn document_changed(&mut self, url: &str) -> Navigated {
+    pub fn document_changed(&mut self, navigation: u64, url: &str) -> Navigated {
+        // This navigation, and any older one it superseded, is over.
+        self.leaving.retain(|&id| id > navigation);
         self.generation += 1;
         self.ready = false;
         let trusted = self.trusts(url);
@@ -259,9 +300,11 @@ impl Session {
         live: &str,
         token: &str,
         size: u64,
-    ) -> Result<u64, Refusal> {
+    ) -> Result<(u64, u64), Refusal> {
         self.check_sources(source, live)?;
         let generation = self.generation;
+        let nonce = self.next_save;
+        self.next_save += 1;
         let (id, entry) = self.delivered(token)?;
         if size == 0 || size > MAX_FILE_BYTES {
             return Err(Refusal::Size);
@@ -269,8 +312,8 @@ impl Session {
         if entry.state != State::Delivered(Save::Idle) {
             return Err(Refusal::InFlight);
         }
-        entry.state = State::Delivered(Save::AwaitingCommit { generation });
-        Ok(id)
+        entry.state = State::Delivered(Save::AwaitingCommit { generation, nonce });
+        Ok((id, nonce))
     }
 
     /// The page filled the save buffer. Returns where to write.
@@ -279,12 +322,15 @@ impl Session {
         source: &str,
         live: &str,
         token: &str,
+        save: u64,
     ) -> Result<(u64, PathBuf), Refusal> {
         self.check_sources(source, live)?;
         let current = self.generation;
         let (id, entry) = self.delivered(token)?;
         match entry.state {
-            State::Delivered(Save::AwaitingCommit { generation }) if generation == current => {
+            State::Delivered(Save::AwaitingCommit { generation, nonce })
+                if generation == current && nonce == save =>
+            {
                 entry.state = State::Delivered(Save::Writing);
                 Ok((id, entry.path.clone()))
             }
@@ -313,6 +359,13 @@ mod tests {
 
     const HOME: &str = "https://app.test/";
     const AWAY: &str = "https://evil.test/";
+    /// A navigation id; these tests have no navigation in progress.
+    const NAV: u64 = 1;
+
+    /// Begin a save and return its token and nonce as the page would see them.
+    fn begin(s: &mut Session, token: &str, size: u64) -> Result<(u64, u64), Refusal> {
+        s.begin_save(HOME, HOME, token, size)
+    }
 
     fn session() -> Session {
         Session::new(vec!["https://app.test".into()])
@@ -349,14 +402,18 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_page_message(r#"{"type":"webwrap-save-commit","token":"3"}"#),
-            Some(PageMessage::SaveCommit { token: "3".into() })
+            parse_page_message(r#"{"type":"webwrap-save-commit","token":"3","save":9}"#),
+            Some(PageMessage::SaveCommit {
+                token: "3".into(),
+                save: 9
+            })
         );
         for other in [
             r#"{"type":"site-message"}"#,
             r#""webwrap-ready""#,
             r#"{"type":"webwrap-save","token":"3","size":-1}"#,
             r#"{"type":"webwrap-save","token":"3","size":1.5}"#,
+            r#"{"type":"webwrap-save-commit","token":"3"}"#,
             "not json",
         ] {
             assert_eq!(parse_page_message(other), None, "{other}");
@@ -394,7 +451,7 @@ mod tests {
         let mut s = session();
         s.open(path("a.psd"), HOME);
         let token = s.ready(HOME, HOME).unwrap()[0].token;
-        s.document_changed("https://app.test/reload");
+        s.document_changed(NAV, "https://app.test/reload");
         assert_eq!(s.delivery_read(token, HOME), AfterRead::Retry(vec![]));
         // The new document announces itself and gets the file.
         assert_eq!(s.ready(HOME, HOME).unwrap()[0].token, token);
@@ -413,7 +470,7 @@ mod tests {
     fn leaving_the_trusted_origin_revokes_delivered_tokens_but_keeps_queued_files() {
         let mut s = session();
         let token = delivered(&mut s, "a.psd");
-        let navigated = s.document_changed(AWAY);
+        let navigated = s.document_changed(NAV, AWAY);
         assert_eq!(navigated.revoked, 1);
         // Gate 8: neither the untrusted page nor a later trusted one can use it.
         assert_eq!(
@@ -422,7 +479,7 @@ mod tests {
         );
         assert_eq!(s.ready(AWAY, AWAY), Err(Refusal::Untrusted));
         assert!(s.open(path("b.psd"), AWAY).is_empty());
-        s.document_changed(HOME);
+        s.document_changed(NAV, HOME);
         assert_eq!(
             s.begin_save(HOME, HOME, &token.to_string(), 4),
             Err(Refusal::UnknownToken)
@@ -438,8 +495,8 @@ mod tests {
         let mut s = session();
         let token = delivered(&mut s, "a.psd");
         let t = token.to_string();
-        s.begin_save(HOME, HOME, &t, 4).unwrap();
-        let navigated = s.document_changed("https://app.test/other");
+        let (_, nonce) = begin(&mut s, &t, 4).unwrap();
+        let navigated = s.document_changed(NAV, "https://app.test/other");
         assert_eq!(
             navigated,
             Navigated {
@@ -447,9 +504,62 @@ mod tests {
                 dropped_saves: vec![token]
             }
         );
-        assert_eq!(s.commit_save(HOME, HOME, &t), Err(Refusal::NotAwaiting));
+        assert_eq!(
+            s.commit_save(HOME, HOME, &t, nonce),
+            Err(Refusal::NotAwaiting)
+        );
         // The token still works for a fresh save.
-        assert_eq!(s.begin_save(HOME, HOME, &t, 4), Ok(token));
+        assert_eq!(begin(&mut s, &t, 4).unwrap().0, token);
+    }
+
+    #[test]
+    fn a_late_commit_cannot_fill_in_for_a_later_save_of_the_same_file() {
+        let mut s = session();
+        let token = delivered(&mut s, "a.psd");
+        let t = token.to_string();
+        let (_, first) = begin(&mut s, &t, 4).unwrap();
+        s.document_changed(NAV, "https://app.test/other");
+        let (_, second) = begin(&mut s, &t, 4).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            s.commit_save(HOME, HOME, &t, first),
+            Err(Refusal::NotAwaiting)
+        );
+        assert_eq!(
+            s.commit_save(HOME, HOME, &t, second),
+            Ok((token, path("a.psd")))
+        );
+    }
+
+    #[test]
+    fn nothing_is_posted_while_a_navigation_to_an_untrusted_origin_is_pending() {
+        let mut s = session();
+        s.open(path("a.psd"), HOME);
+        let token = s.ready(HOME, HOME).unwrap()[0].token;
+        // The live source still reads trusted: the new document does not exist yet.
+        s.navigation_starting(7, AWAY);
+        assert!(!s.may_post(HOME));
+        assert_eq!(s.delivery_read(token, HOME), AfterRead::Retry(vec![]));
+        assert!(s.open(path("b.psd"), HOME).is_empty());
+        // It turned into a download, or was cancelled: the page stays and gets both.
+        let started = s.navigation_completed(7, HOME);
+        assert_eq!(started.len(), 2);
+        // A trusted navigation never holds anything back.
+        s.navigation_starting(8, "https://app.test/next");
+        assert!(s.may_post(HOME));
+    }
+
+    #[test]
+    fn a_new_document_ends_the_navigations_it_superseded() {
+        let mut s = session();
+        s.navigation_starting(3, AWAY);
+        s.navigation_starting(4, AWAY);
+        s.navigation_starting(6, AWAY);
+        s.document_changed(5, HOME);
+        // 6 started after the document of 5 and is still pending.
+        assert!(!s.may_post(HOME));
+        s.navigation_completed(6, HOME);
+        assert!(s.may_post(HOME));
     }
 
     #[test]
@@ -471,7 +581,7 @@ mod tests {
             s.begin_save(HOME, HOME, &t, MAX_FILE_BYTES + 1),
             Err(Refusal::Size)
         );
-        assert_eq!(s.commit_save(HOME, HOME, &t), Err(Refusal::NotAwaiting));
+        assert_eq!(s.commit_save(HOME, HOME, &t, 1), Err(Refusal::NotAwaiting));
         // A queued, not yet delivered, file cannot be saved.
         s.open(path("b.psd"), "https://elsewhere.test/");
         assert_eq!(s.begin_save(HOME, HOME, "2", 4), Err(Refusal::UnknownToken));
@@ -482,16 +592,22 @@ mod tests {
         let mut s = session();
         let token = delivered(&mut s, "a.psd");
         let t = token.to_string();
-        assert_eq!(s.begin_save(HOME, HOME, &t, MAX_FILE_BYTES), Ok(token));
-        assert_eq!(s.begin_save(HOME, HOME, &t, 4), Err(Refusal::InFlight));
-        assert_eq!(s.commit_save(HOME, HOME, &t), Ok((token, path("a.psd"))));
-        assert_eq!(s.begin_save(HOME, HOME, &t, 4), Err(Refusal::InFlight));
-        assert_eq!(s.commit_save(HOME, HOME, &t), Err(Refusal::NotAwaiting));
+        let (_, nonce) = begin(&mut s, &t, MAX_FILE_BYTES).unwrap();
+        assert_eq!(begin(&mut s, &t, 4), Err(Refusal::InFlight));
+        assert_eq!(
+            s.commit_save(HOME, HOME, &t, nonce),
+            Ok((token, path("a.psd")))
+        );
+        assert_eq!(begin(&mut s, &t, 4), Err(Refusal::InFlight));
+        assert_eq!(
+            s.commit_save(HOME, HOME, &t, nonce),
+            Err(Refusal::NotAwaiting)
+        );
         s.save_ended(token);
-        assert_eq!(s.begin_save(HOME, HOME, &t, 4), Ok(token));
+        assert!(begin(&mut s, &t, 4).is_ok());
         // A save whose buffer could not be created is abandoned the same way.
         s.save_ended(token);
-        assert_eq!(s.begin_save(HOME, HOME, &t, 4), Ok(token));
+        assert!(begin(&mut s, &t, 4).is_ok());
     }
 
     #[test]
@@ -499,12 +615,15 @@ mod tests {
         let mut s = session();
         let token = delivered(&mut s, "a.psd");
         let t = token.to_string();
-        s.begin_save(HOME, HOME, &t, 4).unwrap();
-        s.commit_save(HOME, HOME, &t).unwrap();
+        let (_, nonce) = begin(&mut s, &t, 4).unwrap();
+        s.commit_save(HOME, HOME, &t, nonce).unwrap();
         // The buffer being written is not reported for closing.
-        assert_eq!(s.document_changed(AWAY).dropped_saves, Vec::<u64>::new());
+        assert_eq!(
+            s.document_changed(NAV, AWAY).dropped_saves,
+            Vec::<u64>::new()
+        );
         s.save_ended(token);
-        s.document_changed(HOME);
+        s.document_changed(NAV, HOME);
         assert_eq!(s.begin_save(HOME, HOME, &t, 4), Err(Refusal::UnknownToken));
     }
 
@@ -515,7 +634,7 @@ mod tests {
         let token = s.ready(HOME, HOME).unwrap()[0].token;
         s.delivery_failed(token);
         assert_eq!(s.name(token), None);
-        s.document_changed(HOME);
+        s.document_changed(NAV, HOME);
         assert!(s.ready(HOME, HOME).unwrap().is_empty());
     }
 }

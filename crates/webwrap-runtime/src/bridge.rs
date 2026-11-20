@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::json;
@@ -19,12 +20,15 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_SHARED_BUFFER_ACCESS, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY,
     COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE,
 };
-use webview2_com::{take_pwstr, ContentLoadingEventHandler, WebMessageReceivedEventHandler};
+use webview2_com::{
+    take_pwstr, ContentLoadingEventHandler, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, WebMessageReceivedEventHandler,
+};
 use webwrap_bridge::{
     check_file, parse_page_message, AfterRead, Delivery, PageMessage, Refusal, Session,
     MAX_FILE_BYTES,
 };
-use windows::core::{Interface, HSTRING, PWSTR};
+use windows::core::{Interface, BOOL, HSTRING, PWSTR};
 
 use crate::{report, save};
 
@@ -88,7 +92,15 @@ pub struct Bridge {
     /// Locked only on the UI thread; the Mutex makes the bridge `Send` for
     /// Tauri's main-thread dispatch.
     session: Arc<Mutex<Session>>,
+    /// Saves being written by a worker. Closing the window waits for them:
+    /// the process exits when the window goes, which would kill the write.
+    writing: Arc<AtomicUsize>,
+    close_when_written: Arc<AtomicBool>,
 }
+
+/// What the page is told when a write fails. The reason, which names local
+/// paths, goes only to the user's message box: a page never learns a path.
+const WRITE_FAILED: &str = "the file could not be written; the app has told the user why";
 
 impl Bridge {
     /// Install the safety handlers and the bridge, and queue the files the
@@ -102,6 +114,8 @@ impl Bridge {
         let bridge = Bridge {
             window: window.clone(),
             session: Arc::new(Mutex::new(Session::new(trusted_origins))),
+            writing: Arc::new(AtomicUsize::new(0)),
+            close_when_written: Arc::new(AtomicBool::new(false)),
         };
         let installer = bridge.clone();
         window.with_webview(move |platform| {
@@ -135,16 +149,64 @@ impl Bridge {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Called when the user closes the window. Returns true if the close must
+    /// wait for a save; the window then closes itself when the save is done.
+    pub fn hold_close(&self) -> bool {
+        if self.writing.load(Ordering::SeqCst) == 0 {
+            return false;
+        }
+        self.close_when_written.store(true, Ordering::SeqCst);
+        true
+    }
+
     fn add_handlers(&self, webview: &ICoreWebView2) -> windows::core::Result<()> {
         let mut token = 0;
         let bridge = self.clone();
         unsafe {
+            // Added after the hardening handler, so a navigation it or wry
+            // cancelled is already marked and is not counted.
+            webview.add_NavigationStarting(
+                &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                    let Some(args) = args else { return Ok(()) };
+                    let mut cancelled = BOOL::default();
+                    args.Cancel(&mut cancelled)?;
+                    if cancelled.as_bool() {
+                        return Ok(());
+                    }
+                    let (mut id, mut uri) = (0, PWSTR::null());
+                    args.NavigationId(&mut id)?;
+                    args.Uri(&mut uri)?;
+                    bridge.session().navigation_starting(id, &take_pwstr(uri));
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+            let bridge = self.clone();
+            webview.add_NavigationCompleted(
+                &NavigationCompletedEventHandler::create(Box::new(move |sender, args| {
+                    let (Some(sender), Some(args)) = (sender, args) else {
+                        return Ok(());
+                    };
+                    let mut id = 0;
+                    args.NavigationId(&mut id)?;
+                    let live = live_source(&sender);
+                    let started = bridge.session().navigation_completed(id, &live);
+                    bridge.start(started);
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+            let bridge = self.clone();
             // A new document, before any of its scripts run.
             webview.add_ContentLoading(
-                &ContentLoadingEventHandler::create(Box::new(move |sender, _| {
-                    let Some(sender) = sender else { return Ok(()) };
+                &ContentLoadingEventHandler::create(Box::new(move |sender, args| {
+                    let (Some(sender), Some(args)) = (sender, args) else {
+                        return Ok(());
+                    };
+                    let mut id = 0;
+                    args.NavigationId(&mut id)?;
                     let source = live_source(&sender);
-                    let navigated = bridge.session().document_changed(&source);
+                    let navigated = bridge.session().document_changed(id, &source);
                     for token in navigated.dropped_saves {
                         close_buffer(token);
                     }
@@ -225,16 +287,16 @@ impl Bridge {
             PageMessage::Save { token, size } => {
                 let begun = self.session().begin_save(source, live, &token, size);
                 match begun {
-                    Ok(id) => {
-                        if let Err(error) = self.post_save_buffer(id, &token, size) {
+                    Ok((id, nonce)) => {
+                        if let Err(error) = self.post_save_buffer(id, nonce, &token, size) {
                             self.finish_save(id, token, Err(error));
                         }
                     }
                     Err(refusal) => self.refuse_save(&token, refusal),
                 }
             }
-            PageMessage::SaveCommit { token } => {
-                let committed = self.session().commit_save(source, live, &token);
+            PageMessage::SaveCommit { token, save } => {
+                let committed = self.session().commit_save(source, live, &token, save);
                 match committed {
                     Ok((id, path)) => self.write(id, token, path),
                     Err(refusal) => self.refuse_save(&token, refusal),
@@ -345,7 +407,7 @@ impl Bridge {
 
     // ---- Saving ----------------------------------------------------------
 
-    fn post_save_buffer(&self, id: u64, token: &str, size: u64) -> Result<(), String> {
+    fn post_save_buffer(&self, id: u64, nonce: u64, token: &str, size: u64) -> Result<(), String> {
         with_ui(|ui| {
             let buffer = unsafe { ui.environment.CreateSharedBuffer(size) }
                 .map_err(|error| error.to_string())?;
@@ -353,7 +415,12 @@ impl Bridge {
             Ok::<_, String>(())
         })
         .ok_or("the window is gone")??;
-        let info = json!({ "type": "webwrap-save-buffer", "token": token, "size": size });
+        let info = json!({
+            "type": "webwrap-save-buffer",
+            "token": token,
+            "size": size,
+            "save": nonce,
+        });
         let posted = self.post_buffer(id, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, &info);
         if posted.is_err() {
             close_buffer(id);
@@ -374,15 +441,22 @@ impl Bridge {
             Err(error) => return self.finish_save(id, token, Err(error)),
         };
         let bridge = self.clone();
+        self.writing.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
             // SAFETY: the buffer is `size` bytes and stays mapped until the UI
             // thread closes it in `finish_save`, after this write. The page
             // can still change it meanwhile, which only alters its own save.
             let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, size as usize) };
-            let written =
-                save::replace(&path, bytes).map_err(|error| format!("{}: {error}", path.display()));
+            let written = save::replace(&path, bytes)
+                .map_err(|error| format!("{} could not be saved.\n\n{error}", path.display()));
             let window = bridge.window.clone();
-            let _ = window.run_on_main_thread(move || bridge.finish_save(id, token, written));
+            let _ = window.run_on_main_thread(move || {
+                bridge.finish_save(id, token, written);
+                let last = bridge.writing.fetch_sub(1, Ordering::SeqCst) == 1;
+                if last && bridge.close_when_written.load(Ordering::SeqCst) {
+                    let _ = bridge.window.close();
+                }
+            });
         });
     }
 
@@ -393,10 +467,13 @@ impl Bridge {
             Ok(()) => json!({ "type": "webwrap-save-result", "token": token, "ok": true }),
             Err(error) => {
                 report::log(format_args!("save-failed {error}"));
-                report::error_box_async(format!(
-                    "The file could not be saved. The original was left as it was.\n\n{error}"
-                ));
-                json!({ "type": "webwrap-save-result", "token": token, "ok": false, "error": error })
+                report::error_box_async(error.clone());
+                json!({
+                    "type": "webwrap-save-result",
+                    "token": token,
+                    "ok": false,
+                    "error": WRITE_FAILED,
+                })
             }
         };
         self.reply(&reply);
@@ -430,7 +507,7 @@ impl Bridge {
         let Some(live) = with_ui(|ui| live_source(&ui.webview)) else {
             return;
         };
-        if !self.session().trusts(&live) {
+        if !self.session().may_post(&live) {
             return;
         }
         with_ui(|ui| unsafe {
@@ -438,5 +515,27 @@ impl Bridge {
                 .webview
                 .PostWebMessageAsJson(&HSTRING::from(message.to_string()));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_exactly;
+
+    #[test]
+    fn a_file_that_changed_size_is_refused_rather_than_delivered_short() {
+        let path = std::env::temp_dir().join(format!("webwrap-read-{}.bin", std::process::id()));
+        std::fs::write(&path, b"0123456789").unwrap();
+        let mut target = vec![0u8; 10];
+        read_exactly(&path, target.as_mut_ptr() as usize, 10).unwrap();
+        assert_eq!(target, b"0123456789");
+        // Grew since its size was taken: the tail would be lost.
+        assert!(read_exactly(&path, target.as_mut_ptr() as usize, 8)
+            .unwrap_err()
+            .contains("changed"));
+        // Shrank: there is not enough to fill the buffer.
+        let mut bigger = vec![0u8; 12];
+        assert!(read_exactly(&path, bigger.as_mut_ptr() as usize, 12).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }

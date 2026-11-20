@@ -27,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::bridge::Bridge;
-use crate::single_instance::Role;
+use crate::single_instance::{Forwarded, Role};
 
 enum Mode {
     Run { files: Vec<OsString> },
@@ -190,6 +190,16 @@ fn run(
                     true,
                 ),
             };
+            // Closing waits for a save being written: the process ends with
+            // the window, which would kill the write half done.
+            let holder = bridge.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if holder.hold_close() {
+                        api.prevent_close();
+                    }
+                }
+            });
             std::thread::spawn(move || {
                 for files in inbox {
                     bridge.open_forwarded(files);
@@ -239,6 +249,15 @@ fn main() {
     match single_instance::claim(&spec.app_id) {
         Ok(Role::Secondary) => {
             let forwarded = single_instance::forward(&spec.app_id, &files);
+            if let Ok(Forwarded::NotOurs) = forwarded {
+                // Someone else created the pipe first. Nothing was sent to
+                // it; this launch runs on its own instead.
+                report::log("single-instance-foreign-pipe");
+                if !bad.is_empty() {
+                    report::error_box_async(bad_files_message(&bad));
+                }
+                run(spec, data_dir, files, None)
+            }
             let mut message = if bad.is_empty() {
                 String::new()
             } else {

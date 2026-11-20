@@ -24,6 +24,8 @@ These are decided here; the evidence will list them as deviations.
 4. **Files not yet delivered survive navigation to an untrusted origin.** They were never exposed to any page, and a sign-in redirect would otherwise drop the file the user just opened. They are still delivered only to a trusted document. Every **delivered** token, and every save in flight, is revoked as the spec says.
 5. **The frame scheme allowlist also admits `blob:` and `data:`.** Neither can launch an external application, and sites embed such frames. `LaunchingExternalUriScheme` is still always cancelled.
 6. **`fileTier` in `--inspect-self` moves to D4**, where the tiers exist.
+8. **A second launch checks who owns the pipe before sending anything.** The pipe's owner is set explicitly to the user, which another user cannot forge. If the owner differs, the launch sends nothing and runs on its own. This closes a pipe pre-created by another user (review finding).
+9. **Opened paths are canonical** (`dunce::canonicalize`), so saving a symlinked file replaces the target, not the link, and paths over 260 characters keep the `\\?\` prefix `ReplaceFileW` needs.
 7. **Files dropped on the window reach the site.** Tauri's drag-and-drop interception is switched off, so a site receives the drop exactly as in a browser, open-only. Today a drop does nothing at all.
 
 ## The page protocol
@@ -35,9 +37,9 @@ This is the contract D2-D4 build on. Messages go through `chrome.webview`. Every
 | page → host | `{"type":"webwrap-ready"}` | This document is listening. Deliver every queued file now and later ones as they arrive. |
 | host → page | shared buffer, read-only, `{"type":"webwrap-file","token","name","size"}` | One opened file |
 | page → host | `{"type":"webwrap-save","token","size"}` | Asks to save `size` bytes to a token's file |
-| host → page | shared buffer, read-write, `{"type":"webwrap-save-buffer","token","size"}` | Fill this, then commit |
-| page → host | `{"type":"webwrap-save-commit","token"}` | The buffer is filled |
-| host → page | message `{"type":"webwrap-save-result","token","ok","error"?}` | The outcome. A failure also shows a message box naming the file |
+| host → page | shared buffer, read-write, `{"type":"webwrap-save-buffer","token","size","save"}` | Fill this, then commit. `save` identifies this save |
+| page → host | `{"type":"webwrap-save-commit","token","save"}` | The buffer is filled. `save` must match, so a late commit can never fill in for a different save of the same file |
+| host → page | message `{"type":"webwrap-save-result","token","ok","error"?}` | The outcome. `error` never contains a path; a failed write shows the user a message box naming the file |
 
 Rules enforced by the bridge state machine:
 
@@ -45,6 +47,9 @@ Rules enforced by the bridge state machine:
 - A document must say `webwrap-ready` before anything is delivered to it. Every new top-level document (`ContentLoading`, before its scripts run) resets this, so nothing is posted into a document that is not listening. Keying this on `NavigationStarting` would be wrong: a navigation that becomes a download, or that another handler cancels, leaves the trusted document in place.
 - A save is refused for a token that is unknown, revoked, or not yet delivered; for a size of 0 or over 4 GiB; and while another save of the same token is in flight.
 - A save buffer that was never committed is dropped on the next top-level navigation.
+- Nothing is posted while an allowed top-level navigation to an untrusted origin is pending. WebView2 holds a navigation until its `NavigationStarting` handlers return, so this closes the gap between reading the live `Source` and the new document existing. The hold ends with that navigation's new document or its `NavigationCompleted`.
+- A write the trusted page committed before leaving still completes; the page that follows learns nothing about it.
+- Closing the window waits for a save being written, then closes.
 - Reading and writing files happens on a worker thread. The UI thread only creates, posts, and closes buffers.
 
 ## Task 1: `crates/webwrap-bridge`

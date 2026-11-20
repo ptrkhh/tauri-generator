@@ -18,11 +18,12 @@ use windows::Win32::Foundation::{
     LocalFree, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_KERNEL_OBJECT,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER,
+    GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
@@ -47,6 +48,15 @@ pub enum Role {
     Secondary,
 }
 
+/// A SID as text, such as `S-1-5-21-…`.
+unsafe fn sid_string(sid: PSID) -> Result<String, Error> {
+    let mut text = PWSTR::null();
+    ConvertSidToStringSidW(sid, &mut text)?;
+    let result = text.to_string();
+    LocalFree(Some(HLOCAL(text.0.cast())));
+    result.map_err(|_| Error::from_win32())
+}
+
 /// The current user's SID, such as `S-1-5-21-…`.
 fn user_sid() -> Result<String, Error> {
     unsafe {
@@ -67,11 +77,33 @@ fn user_sid() -> Result<String, Error> {
             &mut len,
         )?;
         let user = &*(buffer.as_ptr() as *const TOKEN_USER);
-        let mut sid = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut sid)?;
-        let text = sid.to_string();
-        LocalFree(Some(HLOCAL(sid.0.cast())));
-        text.map_err(|_| Error::from_win32())
+        sid_string(user.User.Sid)
+    }
+}
+
+/// Whether the pipe's owner is this user. The owner is set explicitly when
+/// the pipe is created, and another user cannot make themselves look like us,
+/// so this tells our own app from a pipe someone else created first.
+fn owned_by(pipe: &File, sid: &str) -> bool {
+    unsafe {
+        let mut owner = PSID::default();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let status = GetSecurityInfo(
+            HANDLE(pipe.as_raw_handle()),
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            Some(&mut descriptor),
+        );
+        if status.is_err() {
+            return false;
+        }
+        let same = sid_string(owner).is_ok_and(|owner| owner == sid);
+        LocalFree(Some(HLOCAL(descriptor.0)));
+        same
     }
 }
 
@@ -85,10 +117,12 @@ pub fn claim(app_id: &str) -> Result<Role, Error> {
     let sid = user_sid()?;
     let name = HSTRING::from(pipe_name(app_id, &sid));
     unsafe {
+        // Owned by this user, so a later launch can verify it, even when
+        // elevated (an elevated token's default owner is Administrators).
         // Protected DACL: full access for this user, nobody else.
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            &HSTRING::from(format!("D:P(A;;GA;;;{sid})")),
+            &HSTRING::from(format!("O:{sid}D:P(A;;GA;;;{sid})")),
             SDDL_REVISION_1,
             &mut descriptor,
             None,
@@ -132,7 +166,10 @@ pub fn serve(pipe: OwnedHandle, app_id: String, sink: Sender<Vec<PathBuf>>) {
         if let Err(error) = unsafe { ConnectNamedPipe(handle, None) } {
             // A client that connected before this call is already connected.
             if error.code() != ERROR_PIPE_CONNECTED.to_hresult() {
+                // A client that came and went leaves the pipe needing a
+                // disconnect; without one, every later connect fails too.
                 report::log(format_args!("ipc-connect-failed {error}"));
+                let _ = unsafe { DisconnectNamedPipe(handle) };
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -178,15 +215,24 @@ fn open_pipe(name: &str, deadline: Instant) -> std::io::Result<File> {
     }
 }
 
+pub enum Forwarded {
+    Done,
+    /// The pipe belongs to someone else: nothing was sent, and this launch
+    /// should run on its own.
+    NotOurs,
+}
+
 /// Hand files to the running instance and let it take the foreground.
 /// No files means only "come to the front".
-pub fn forward(app_id: &str, files: &[PathBuf]) -> Result<(), String> {
+pub fn forward(app_id: &str, files: &[PathBuf]) -> Result<Forwarded, String> {
     let frame = encode_request(app_id, files).map_err(|error| error.to_string())?;
     let sid = user_sid().map_err(|error| error.to_string())?;
     let name = pipe_name(app_id, &sid);
-    let deadline = Instant::now() + TIMEOUT;
-    let mut pipe = open_pipe(&name, deadline)
+    let mut pipe = open_pipe(&name, Instant::now() + TIMEOUT)
         .map_err(|error| format!("the running app could not be reached: {error}"))?;
+    if !owned_by(&pipe, &sid) {
+        return Ok(Forwarded::NotOurs);
+    }
     let mut server = 0;
     unsafe {
         if GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut server).is_ok() {
@@ -203,8 +249,8 @@ pub fn forward(app_id: &str, files: &[PathBuf]) -> Result<(), String> {
             .map(|()| ack[0]);
         let _ = done.send(result);
     });
-    match outcome.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(Ok(ACCEPTED)) => Ok(()),
+    match outcome.recv_timeout(TIMEOUT) {
+        Ok(Ok(ACCEPTED)) => Ok(Forwarded::Done),
         Ok(Ok(_)) => Err("the running app refused the request".into()),
         Ok(Err(error)) => Err(format!("the running app did not answer: {error}")),
         Err(_) => Err("the running app did not answer within 5 seconds".into()),
@@ -239,10 +285,25 @@ mod tests {
         let (sink, received) = mpsc::channel();
         serve(pipe, app.into(), sink);
         let file = std::env::temp_dir().join("forwarded.psd");
-        forward(app, std::slice::from_ref(&file)).unwrap();
+        assert!(matches!(
+            forward(app, std::slice::from_ref(&file)),
+            Ok(Forwarded::Done)
+        ));
         assert_eq!(received.recv_timeout(TIMEOUT).unwrap(), [file]);
-        forward(app, &[]).unwrap();
+        assert!(matches!(forward(app, &[]), Ok(Forwarded::Done)));
         assert!(received.recv_timeout(TIMEOUT).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_owner_check_accepts_our_pipe_and_nobody_else() {
+        let app = "0000000000d1own0";
+        let Role::Primary(_pipe) = claim(app).unwrap() else {
+            panic!("expected to be primary");
+        };
+        let sid = user_sid().unwrap();
+        let client = open_pipe(&pipe_name(app, &sid), Instant::now() + TIMEOUT).unwrap();
+        assert!(owned_by(&client, &sid));
+        assert!(!owned_by(&client, "S-1-5-18"), "LocalSystem is not us");
     }
 
     #[test]
@@ -268,7 +329,7 @@ mod tests {
             REJECTED,
             "wrong app"
         );
-        forward(app, &[]).unwrap();
+        assert!(matches!(forward(app, &[]), Ok(Forwarded::Done)));
         assert!(received.recv_timeout(TIMEOUT).unwrap().is_empty());
     }
 }

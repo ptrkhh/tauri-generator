@@ -6,12 +6,20 @@ pub const MAX_FILES: usize = 16;
 /// The largest file the bridge moves in either direction.
 pub const MAX_FILE_BYTES: u64 = 4 << 30;
 
-/// Turn a command-line argument into the absolute path of an existing file.
+/// Turn a command-line argument into the canonical path of an existing file.
 ///
-/// The path is made absolute here, in the process the user launched, because
-/// a running instance that receives it has a different current directory.
+/// Canonical, so a symlink resolves to its target and saving replaces the
+/// file rather than the link, and so a running instance with a different
+/// current directory reads the same file. Paths over 260 characters keep the
+/// `\\?\` prefix, which Win32 file calls need for them.
 pub fn resolve(arg: &OsStr) -> Result<PathBuf, String> {
-    let path = std::path::absolute(Path::new(arg)).map_err(|error| error.to_string())?;
+    let path = dunce::canonicalize(Path::new(arg)).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "it does not exist".to_string()
+        } else {
+            error.to_string()
+        }
+    })?;
     // The forwarding message is JSON, which cannot carry a non-Unicode name.
     if path.to_str().is_none() {
         return Err("its name is not valid Unicode".into());
@@ -71,7 +79,23 @@ mod tests {
         let dir = temp_dir("file");
         let file = dir.join("a.psd");
         std::fs::write(&file, b"8BPS").unwrap();
-        assert_eq!(resolve(file.as_os_str()).unwrap(), file);
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        assert_eq!(resolve(file.as_os_str()).unwrap(), canonical);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_resolves_to_its_target_so_saving_replaces_the_file() {
+        let dir = temp_dir("link");
+        let target = dir.join("real.psd");
+        std::fs::write(&target, b"8BPS").unwrap();
+        let link = dir.join("link.psd");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            resolve(link.as_os_str()).unwrap(),
+            std::fs::canonicalize(&target).unwrap()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

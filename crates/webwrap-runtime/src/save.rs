@@ -45,10 +45,18 @@ pub fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the file has no folder"))?;
-    let (temp, mut file) = create_temp(dir)?;
+    let unchanged = |error: io::Error| {
+        io::Error::new(
+            error.kind(),
+            format!("{error}. The original file was not changed."),
+        )
+    };
+    let (temp, mut file) = create_temp(dir).map_err(unchanged)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    let result = written.and_then(|()| swap_in(path, &temp, dir));
+    let result = written
+        .map_err(unchanged)
+        .and_then(|()| swap_in(path, &temp, dir));
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
@@ -79,13 +87,17 @@ fn swap_in(path: &Path, temp: &Path, dir: &Path) -> io::Result<()> {
             // did not take its place. Put the original back.
             fs::rename(&backup, path).map_err(|undo| {
                 io::Error::other(format!(
-                    "{error}; the original is preserved as {} because restoring it failed: {undo}",
+                    "{error}. Putting the original back also failed ({undo}): it is now named {}",
                     backup.display()
                 ))
             })?;
-            Err(io::Error::other(error))
+            Err(io::Error::other(format!(
+                "{error}. The original file was not changed."
+            )))
         }
-        Err(error) => Err(io::Error::other(error)),
+        Err(error) => Err(io::Error::other(format!(
+            "{error}. The original file was not changed."
+        ))),
     }
 }
 
@@ -146,7 +158,8 @@ mod tests {
         let mut permissions = fs::metadata(&path).unwrap().permissions();
         permissions.set_readonly(true);
         fs::set_permissions(&path, permissions.clone()).unwrap();
-        assert!(replace(&path, b"8BPS new").is_err());
+        let error = replace(&path, b"8BPS new").unwrap_err().to_string();
+        assert!(error.contains("not changed"), "{error}");
         assert_eq!(fs::read(&path).unwrap(), b"8BPS old");
         assert_eq!(names(&dir), ["a.psd"]);
         #[allow(clippy::permissions_set_readonly_false)]
