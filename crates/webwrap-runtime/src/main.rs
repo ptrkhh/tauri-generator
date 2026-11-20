@@ -348,7 +348,13 @@ mod tests {
         std::fs::write(&file, b"8BPS").unwrap();
         let mut values = vec![file.clone().into_os_string(), dir.join("gone.psd").into()];
         let (good, bad) = resolve_files(&values);
-        assert_eq!(good, std::slice::from_ref(&file));
+        // Canonical, so compared as files: Windows may spell the temp folder
+        // with an 8.3 short name that canonicalizing expands.
+        assert_eq!(good.len(), 1);
+        assert_eq!(
+            std::fs::canonicalize(&good[0]).unwrap(),
+            std::fs::canonicalize(&file).unwrap()
+        );
         assert!(bad[0].contains("does not exist"), "{bad:?}");
         values = vec![file.clone().into_os_string(); MAX_FILES + 2];
         let (good, bad) = resolve_files(&values);
