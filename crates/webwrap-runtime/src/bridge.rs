@@ -26,8 +26,8 @@ use webview2_com::{
     NavigationStartingEventHandler, WebMessageReceivedEventHandler,
 };
 use webwrap_bridge::{
-    check_file, parse_page_message, AfterRead, Delivery, PageMessage, Refusal, Session,
-    LEAVING_TIMEOUT, MAX_FILE_BYTES,
+    check_file, handle_refused, parse_page_message, protected_folders, AfterRead, Delivery,
+    PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILE_BYTES,
 };
 use webwrap_spec::Adapter;
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
@@ -102,6 +102,11 @@ pub struct Bridge {
     recheck_scheduled: Arc<AtomicBool>,
     adapter: Adapter,
 }
+
+/// Why a `vscodeDev` app does not open a file WebView2 would refuse it.
+const HANDLE_REFUSED: &str = "vscode.dev cannot use files in folders Windows keeps for apps, \
+     such as AppData, or files whose full path is longer than 260 characters. \
+     Copy the file to another folder, such as Documents, and open the copy.";
 
 /// What the page is told when a write fails. The reason, which names local
 /// paths, goes only to the user's message box: a page never learns a path.
@@ -446,6 +451,10 @@ impl Bridge {
 
     /// The `vscodeDev` delivery: a read-write handle instead of the bytes.
     fn post_handle(&self, delivery: &Delivery) -> Result<(), String> {
+        // Told now, rather than by a security error inside vscode.dev.
+        if handle_refused(&delivery.path, &protected_folders()) {
+            return Err(HANDLE_REFUSED.into());
+        }
         let live = with_ui(|ui| live_source(&ui.webview)).ok_or("the window is gone")?;
         // Decided immediately before posting.
         let after = self.session().delivery_read(delivery.token, &live);

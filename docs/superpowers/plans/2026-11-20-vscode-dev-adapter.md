@@ -47,8 +47,13 @@ Read from the live workbench bundle (`workbench.web.main.internal.js`, build `8a
    - The script tries Ctrl+Shift+P for up to 30 s, because early on vscode.dev may not handle keys yet.
    - It then posts `webwrap-open-failed`. The runtime shows a message box naming the file, saying that vscode.dev's own File > Open File... will open it.
    - The file stays queued in the page, so that command does open it. Nothing retries automatically.
-6. **Ctrl+O needs no code.** With nothing queued, the script passes `showOpenFilePicker` through to WebView2's native picker. The hands-on PC run checks that it saves back. CI cannot drive the Windows dialog reliably.
-7. **The live test runs on every push and weekly.**
+6. **Files WebView2 would refuse a site are refused up front.**
+   - Measured in CI (run 44771559248, both architectures). A handle WebView2 creates is refused by its own security check, for reading or writing, inside `%LOCALAPPDATA%` (including `%TEMP%`), `%APPDATA%`, and `%ProgramData%`, and for paths over 260 characters. Documents, the home folder, and other folders work.
+   - So the runtime refuses those files with a message box, saying to copy the file to Documents. Otherwise vscode.dev would show a cryptic security error.
+   - It also refuses Program Files and Windows, which Chromium blocks too. Those were not measured.
+   - `webwrap_bridge::handle_refused` does the check; `protected_folders` reads the folders from the environment.
+7. **Ctrl+O needs no code.** With nothing queued, the script passes `showOpenFilePicker` through to WebView2's native picker. The hands-on PC run checks that it saves back. CI cannot drive the Windows dialog reliably.
+8. **The live test runs on every push and weekly.**
    - A separate CI step runs it, so a vscode.dev outage reads as that step failing, not the bridge.
    - The workflow gains a weekly `schedule`.
 

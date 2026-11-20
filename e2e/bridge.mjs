@@ -321,42 +321,45 @@ async function checkVscodeAdapter() {
   const pageC = await attach(DEBUG_C, HOME_C);
   await pageC.loaded(HOME_C);
 
-  await check('vscodeDev: where WebView2 lets a site use a file handle (recorded)', async () => {
+  await check('vscodeDev: files WebView2 would refuse a site are refused with a message; others open and save', async () => {
     assert((await opened(pageC, 'one.md')) === 'first file', 'one.md opened with the wrong text');
+    // Measured in CI (D2 evidence): WebView2 refuses a site's handle, for reading
+    // or writing, inside these folders and for paths over 260 characters.
     const home = os.homedir();
-    const dirs = {
-      'outside AppData (runner temp)': outside,
-      'Documents': path.join(home, 'Documents'),
-      'home folder itself': home,
+    const refused = {
       'LOCALAPPDATA\\Temp': work,
       'APPDATA (Roaming)': process.env.APPDATA,
       'ProgramData': process.env.ProgramData,
-      'outside AppData, over 260 characters': path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`)),
+      'over 260 characters': path.join(outside, ...Array.from({ length: 6 }, (_, i) => `nested-folder-${i}-${'x'.repeat(30)}`)),
     };
-    const places = Object.entries(dirs).map(([where, dir], i) => {
+    const allowed = { 'Documents': path.join(home, 'Documents'), 'home folder': home };
+    const place = ([where, dir], i, prefix) => {
       fs.mkdirSync(dir, { recursive: true });
-      return { where, file: makeFile(`place-${i}.md`, 'place', dir) };
-    });
+      return { where, file: makeFile(`${prefix}-${i}.md`, `${prefix} ${i}`, dir) };
+    };
+    const no = Object.entries(refused).map((entry, i) => place(entry, i, 'refused'));
+    const yes = Object.entries(allowed).map((entry, i) => place(entry, i, 'allowed'));
     try {
-      await forward(APP_C, DEBUG_C, ...places.map((place) => place.file));
-      await until(() => pageC.evaluate(`(window.__handles ?? {})['place-${places.length - 1}.md'] !== undefined`), 'every place handed over', 150000);
-      for (const { where, file } of places) {
-        const outcome = await pageC.evaluate(`(async () => {
-          const handle = __handles[${JSON.stringify(path.basename(file))}];
-          const attempt = async (step) => { try { await step(); return 'ok'; } catch (error) { return error.name; } };
-          const read = await attempt(() => handle.getFile());
-          const write = await attempt(async () => {
-            const writable = await handle.createWritable();
-            await writable.write('saved');
-            await writable.close();
-          });
-          return 'read ' + read + ', write ' + write;
-        })()`);
-        const onDisk = fs.readFileSync(file, 'utf8') === 'saved' ? 'file changed' : 'file unchanged';
-        process.stdout.write(`  observed: ${where} (${file.length} characters): ${outcome}; ${onDisk}\n`);
+      await forward(APP_C, DEBUG_C, ...no.map((p) => p.file), ...yes.map((p) => p.file));
+      for (const { where, file } of no) {
+        const name = path.basename(file).replace('.', '\\.');
+        await logged(c, new RegExp(`open-failed ${name}: vscode\\.dev cannot use files in folders Windows keeps`), `${where} refused`);
       }
+      for (const { where, file } of yes) {
+        const name = path.basename(file);
+        assert((await opened(pageC, name)) === name.replace('-', ' ').replace('.md', ''), `${where}: wrong text`);
+        await pageC.evaluate(`(async () => {
+          const writable = await __opened.find((f) => f.name === ${JSON.stringify(name)}).handle.createWritable();
+          await writable.write('saved');
+          await writable.close();
+          return true;
+        })()`);
+        assert(fs.readFileSync(file, 'utf8') === 'saved', `${where}: not saved`);
+      }
+      const names = await pageC.evaluate('__opened.map((f) => f.name).join()');
+      assert(!/refused/.test(names), `a refused file reached the page: ${names}`);
     } finally {
-      for (const { file } of places) fs.rmSync(file, { force: true });
+      for (const { file } of [...no, ...yes]) fs.rmSync(file, { force: true });
     }
   }, explainStandIn(pageC));
 
@@ -383,7 +386,7 @@ async function checkVscodeAdapter() {
     assert((await opened(pageC, 'three.md')) === 'third file', 'three.md opened with the wrong text');
     await sleep(2000);
     const seen = await pageC.evaluate(`[__opened.map((f) => f.name).join(), editor.value, __keys]`);
-    assert(seen[0].endsWith('two.md,three.md') && seen[0].startsWith('one.md'), `opened ${seen[0]}`);
+    assert(seen[0] === 'one.md,allowed-0.md,allowed-1.md,two.md,three.md', `opened ${seen[0]}`);
     assert(seen[1] === '' && seen[2] === 0, `input reached the page: editor "${seen[1]}", ${seen[2]} key events`);
   }, explainStandIn(pageC));
 
@@ -400,7 +403,7 @@ async function checkVscodeAdapter() {
     })()`);
     await logged(c, /delivery-refused the page is not on a trusted origin/, 'refused readiness');
     await logged(c, /open-failed-refused the page is not on a trusted origin/, 'refused failure report');
-    await forward(APP_C, DEBUG_C, makeFile('while-away.md', 'opened after returning'));
+    await forward(APP_C, DEBUG_C, makeFile('while-away.md', 'opened after returning', outside));
     await sleep(3000);
     const seen = await pageC.evaluate('[__messages, __opened.length]');
     assert(seen.join() === '0,0', `the untrusted page got messages, files: ${seen}`);
@@ -413,7 +416,7 @@ async function checkVscodeAdapter() {
   await check('vscodeDev: when Open File cannot run, the user is told once', async () => {
     await pageC.evaluate(`location.href = ${JSON.stringify(HOME_C + '/?nopalette')}`);
     await pageC.loaded(HOME_C);
-    await forward(APP_C, DEBUG_C, makeFile('no-palette.md', 'never opened'));
+    await forward(APP_C, DEBUG_C, makeFile('no-palette.md', 'never opened', outside));
     // The adapter keeps trying to open the palette for 30 s first.
     await until(() => /open-failed no-palette\.md/.test(c.log), 'the failure in the log', 45000);
     await sleep(5000);

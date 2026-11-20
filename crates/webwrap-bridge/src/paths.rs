@@ -62,6 +62,42 @@ pub fn display_name(path: &Path) -> String {
     }
 }
 
+/// Folders WebView2 does not let a site use a file handle in, read from the
+/// environment: Windows keeps them for apps. Empty where the variables are
+/// unset, as on Linux.
+pub fn protected_folders() -> Vec<PathBuf> {
+    PROTECTED_FOLDER_VARIABLES
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dunce::canonicalize(&dir).unwrap_or(dir))
+        .collect()
+}
+
+const PROTECTED_FOLDER_VARIABLES: [&str; 7] = [
+    "LOCALAPPDATA",
+    "APPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "SystemRoot",
+];
+
+/// Whether WebView2 refuses a site's file handle for `path`: inside one of
+/// the `protected` folders, or long enough to need the `\\?\` prefix. Both
+/// were measured in CI (D2 evidence). Case is ignored, as Windows does.
+pub fn handle_refused(path: &Path, protected: &[PathBuf]) -> bool {
+    let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+    let path = lower(path);
+    path.to_string_lossy().starts_with(r"\\?\")
+        || protected
+            .iter()
+            .filter(|root| root.is_absolute())
+            .any(|root| path.starts_with(lower(root)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +164,22 @@ mod tests {
         assert_eq!(display_name(Path::new("/x/y/photo.psd")), "photo.psd");
         assert_eq!(display_name(Path::new("/x/a\nb.md")), "a_b.md");
         assert_eq!(display_name(Path::new("/")), "file");
+    }
+
+    #[test]
+    fn handles_are_refused_inside_protected_folders_and_for_verbatim_paths() {
+        let base = std::env::temp_dir();
+        let protected = [
+            base.join("Users/Me/AppData/Local"),
+            PathBuf::from("relative"),
+        ];
+        let refused = |path: PathBuf| handle_refused(&path, &protected);
+        assert!(refused(base.join("Users/Me/AppData/Local/Temp/a.md")));
+        assert!(refused(base.join("users/me/appdata/LOCAL/a.md")));
+        assert!(refused(PathBuf::from(r"\\?\C:\long\a.md")));
+        assert!(!refused(base.join("Users/Me/Documents/a.md")));
+        // Whole folder names only, and a relative entry protects nothing.
+        assert!(!refused(base.join("Users/Me/AppData/LocalCopy/a.md")));
+        assert!(!refused(base.join("relative/a.md")));
     }
 }
