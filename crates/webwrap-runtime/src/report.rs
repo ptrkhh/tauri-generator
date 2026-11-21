@@ -2,18 +2,29 @@ use std::fmt::Display;
 use std::io::Write;
 
 use windows::core::HSTRING;
-use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+use windows::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE,
+};
 
-/// Show an error and wait for the user to dismiss it.
-pub fn error_box(message: &str) {
+fn message_box(message: &str, icon: MESSAGEBOX_STYLE) {
     unsafe {
         MessageBoxW(
             None,
             &HSTRING::from(message),
             &HSTRING::from("WebWrap"),
-            MB_OK | MB_ICONERROR,
+            MB_OK | icon,
         );
     }
+}
+
+/// Show an error and wait for the user to dismiss it.
+pub fn error_box(message: &str) {
+    message_box(message, MB_ICONERROR);
+}
+
+/// Show a notice without blocking the caller.
+pub fn info_box_async(message: String) {
+    std::thread::spawn(move || message_box(&message, MB_ICONINFORMATION));
 }
 
 /// Show an error without blocking the caller, so the window keeps working.

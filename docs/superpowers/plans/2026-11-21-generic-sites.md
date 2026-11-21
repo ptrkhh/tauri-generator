@@ -4,7 +4,7 @@ Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](.
 
 ## Status
 
-Task 1 done 2026-11-21. Written 2026-11-21.
+Tasks 1 and 2 done 2026-11-21. Written 2026-11-21.
 
 ## Goal
 
@@ -32,7 +32,7 @@ As D1-D3:
 ## Clarifications of the spec
 
 1. **One page script, `src/generic.js`,** templated with the trusted origins like `vscode.js`. On a trusted top-level document it:
-   - defines `window.launchQueue` with `setConsumer(fn)` before site scripts run, unless the browser already has one;
+   - defines `window.launchQueue` with `setConsumer(fn)` before site scripts run. It replaces any `launchQueue` the browser already has: Chromium exposes one on every page, but WebView2 never fills it, because nothing there is an installed PWA. Keeping the browser's would leave tier 1 dead;
    - waits for whichever comes first: `setConsumer` is called, or 10 s after `load` (or 10 s from now if the document has already loaded);
    - then posts `webwrap-ready` once, with `"want":"handle"` if a consumer was set and `"want":"buffer"` otherwise. A document keeps its choice: a consumer set after 10 s is not used.
    - A document whose `load` never fires never becomes ready and its files stay queued. That is the same silence as today, and accepted for D4.
@@ -104,7 +104,7 @@ As D1-D3:
   5. **`/drop`** has no upload box and a drop zone that calls `preventDefault()` on `dragover` and on `drop`, as a site that handles drops does (clarification 4). It gets the file. Log: `file-tier 3`.
   6. **`/none`** has neither. Log: `open-failed` and a box naming the file, with no `file-tier`.
   7. **`/picker`** has a button that calls `showOpenFilePicker`. The test clicks it with DevTools mouse events (a user gesture), picks a file from `outside` with D3's `pickInDialog`, extended to find WebView2's own picker window among the app's `msedgewebview2.exe` processes (clarification 6), and the page writes through the handle. The file changes, and the runtime delivered nothing (tier 2 is untouched).
-  8. **Gate 8 still holds:** on `https://127.0.0.1:8447/pwa` (untrusted), `'launchQueue' in window` is false, no `webwrap-ready` is accepted, and a forwarded file is not delivered.
+  8. **Gate 8 still holds:** on `https://127.0.0.1:8447/pwa` (untrusted), `launchQueue.setConsumer` is the browser's own (`[native code]`), not the script's, no `webwrap-ready` is accepted, and a forwarded file is not delivered.
 - **D1's `bridge-a` and `bridge-b` pages change** (check before Task 2 lands). They are `adapter: none`, so the generic script now runs there too and also receives their `webwrap-file` buffers. Their listener must copy the bytes synchronously before hashing, because the script releases the buffer. Their page must also have a drop handler, so files there take tier 3 and do not raise tier 4 boxes. The one-time open-only notice then fires once per app in this suite (clarification 7). The box is shown on its own thread, as the save-failure box already is, and the evidence records that it appeared. Their save-protocol checks still post messages directly and are unaffected.
 
 **Live** (`e2e/generic-live.mjs`, its own step, also weekly): an app for `https://excalidraw.com/` launched with a small `.excalidraw` file from `outside`.

@@ -6,8 +6,9 @@
 use std::path::Path;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Environment14, ICoreWebView2ObjectCollection, ICoreWebView2ObjectCollectionView,
-    ICoreWebView2_23, COREWEBVIEW2_FILE_SYSTEM_HANDLE_PERMISSION_READ_WRITE,
+    ICoreWebView2Environment14, ICoreWebView2FileSystemHandle, ICoreWebView2ObjectCollection,
+    ICoreWebView2ObjectCollectionView, ICoreWebView2_23,
+    COREWEBVIEW2_FILE_SYSTEM_HANDLE_PERMISSION_READ_WRITE,
 };
 use windows::core::{IUnknown, Interface, HSTRING};
 
@@ -17,18 +18,28 @@ pub fn script(origins: &[String]) -> String {
     include_str!("vscode.js").replace("__WEBWRAP_TRUSTED__", &origins)
 }
 
-/// Post `message` with a read-write handle to `path` as its one additional object.
+/// A read-write handle to `path`. Also used by the generic adapter, which
+/// falls back to a shared buffer if WebView2 refuses it.
+pub fn create_handle(
+    environment: &ICoreWebView2Environment14,
+    path: &Path,
+) -> windows::core::Result<ICoreWebView2FileSystemHandle> {
+    unsafe {
+        environment.CreateWebFileSystemFileHandle(
+            &HSTRING::from(path),
+            COREWEBVIEW2_FILE_SYSTEM_HANDLE_PERMISSION_READ_WRITE,
+        )
+    }
+}
+
+/// Post `message` with `handle` as its one additional object.
 pub fn post_handle(
     environment: &ICoreWebView2Environment14,
     webview: &ICoreWebView2_23,
-    path: &Path,
+    handle: &ICoreWebView2FileSystemHandle,
     message: &str,
 ) -> windows::core::Result<()> {
     unsafe {
-        let handle = environment.CreateWebFileSystemFileHandle(
-            &HSTRING::from(path),
-            COREWEBVIEW2_FILE_SYSTEM_HANDLE_PERMISSION_READ_WRITE,
-        )?;
         let mut items = [Some(handle.cast::<IUnknown>()?)];
         let mut collection: Option<ICoreWebView2ObjectCollection> = None;
         environment.CreateObjectCollection(1, items.as_mut_ptr(), &mut collection)?;
