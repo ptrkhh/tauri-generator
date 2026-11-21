@@ -4,7 +4,7 @@ Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](.
 
 ## Status
 
-Tasks 1 and 2 done 2026-11-21. Written 2026-11-21.
+Tasks 1 and 2 done and reviewed 2026-11-21; Task 3 written, waiting on CI. Written 2026-11-21.
 
 ## Goal
 

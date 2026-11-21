@@ -33,6 +33,9 @@ const PAGE = `<!doctype html><meta charset=utf-8><title>bridge test</title>
 <a id=pop href="http://127.0.0.1:9/popup-clicked" target=_blank
    style="display:block;width:300px;height:120px;background:#ccc">pop-up link</a>
 <script>
+  // Takes the runtime's dropped files (D4 tier 3), so they raise no
+  // "did not accept" box; these checks read the files through __ww instead.
+  for (const type of ['dragover', 'drop']) addEventListener(type, (event) => event.preventDefault());
   // A pop-up opened by the page's own script, with no click: B's finding 1.
   if (location.search === '?autopopup') setTimeout(() => window.open('https://example.com/scripted'), 300);
 </script>`;
