@@ -75,6 +75,9 @@ jobs:
           & $gen generate --url vscode.dev --name "VS Code" --icon "$fx/twitter-blue.png" --out acceptance `
             --adapter vscodeDev --assoc .md text/markdown "Markdown document"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # A generic site with launchQueue and its own picker, for D4's PC checks.
+          & $gen generate --url excalidraw.com --name Excalidraw --icon "$fx/twitter-blue.png" --out acceptance
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           Copy-Item $env:WEBWRAP_TEMPLATE_X64 acceptance/unspecialized-template-x64.exe
           Copy-Item $env:WEBWRAP_TEMPLATE_ARM64 acceptance/unspecialized-template-arm64.exe
           Copy-Item $gen acceptance/

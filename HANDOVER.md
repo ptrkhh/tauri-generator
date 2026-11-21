@@ -1,6 +1,6 @@
 # WebWrap handover
 
-Updated 2026-11-20. The spikes and sub-projects A, B, and C are finished, and D's first phase (D1) is done. A fresh Codex/Claude session should start here:
+Updated 2026-11-21. The spikes and sub-projects A-D are finished; E is next. A fresh Codex/Claude session should start here:
 
 - Work on `main` in the repository root. The `spike/photopea-windows-writeback` branch and its `.worktrees/photopea-windows-writeback` linked worktree were merged and removed; do not look for them.
 - Current code HEAD: check `git log -1 --format=%H` rather than trusting a hash recorded here, which goes stale as soon as the next commit lands.
@@ -57,7 +57,7 @@ The follow-on work was brainstormed on 2026-09-16. The Windows track is split in
 | A | Core spec and identity | schema, validation, canonicalization, identity, nav policy | — | **done**, reviewed, 38 tests |
 | B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **done**, reviewed, 12 tests, Windows-verified |
 | C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (Windows half), 3 | **done**, reviewed, Windows-verified in CI |
-| D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **in progress**: D1 done (6, 7, 8); D2 done (save half of 5) and D3 done (save half of 4), reviewed, verified in CI against the live sites; D4 next |
+| D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **done**: D1 (6, 7, 8), D2 (save half of 5), D3 (save half of 4), D4 (generic sites), each reviewed and verified in CI, live sites included |
 | E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
 | F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
@@ -150,27 +150,36 @@ Plan: [`docs/superpowers/plans/2026-11-20-photopea-adapter.md`](docs/superpowers
   - The same `pickInDialog` could also automate D2's Ctrl+O check, which is still a PC check.
 - **Known limits:** evidence section 6.
 
-## Immediate next step: D4, generic sites
+### Sub-project D4, done 2026-11-21
 
-Write D4's plan from the spec's D4 section. For `adapter: none`, a file request goes through tiers in order, and the user is told which handled it:
+Plan: [`docs/superpowers/plans/2026-11-21-generic-sites.md`](docs/superpowers/plans/2026-11-21-generic-sites.md). Evidence: [`docs/evidence/2026-11-21-generic-sites.md`](docs/evidence/2026-11-21-generic-sites.md). Branch `feat/generic-sites`.
 
-1. **The PWA `launchQueue`:** an initialization script installs it, giving read-write handles. Mind D2's measured handle limits: AppData, shares, and long paths are refused.
-2. **The native picker passthrough:** D4 only verifies it.
-3. **The upload box or a drop:** a `File` built from a shared buffer, open-only.
-4. **An unsupported message.**
+- **Before D4, a file given to an app with no adapter was never delivered,** silently: no real site said `webwrap-ready`.
+- **The page script `crates/webwrap-runtime/src/generic.js`** runs for `adapter: none` on trusted origins. It replaces `launchQueue` (and adds `LaunchParams`), then says ready with `want: handle` once the site sets a consumer, or `want: buffer` 10 s after `load`.
+- **Tiers:**
+  1. a handle to the consumer (D2's `post_handle`). A path WebView2 refuses handles for (`handle_refusal`) goes as a buffer instead;
+  2. the site's own `showOpenFilePicker`, untouched;
+  3. the bytes as a `File` in the one visible upload box, or a constructed drop the site cancels;
+  4. otherwise `webwrap-open-failed`, and a box.
 
-Also in D4:
+  The page reports tiers 1 and 3 with `webwrap-file-tier`, accepted only if it matches how the token was sent (`Session::file_tier`). The first tier 3 shows a one-time notice, remembered by `open-only-notice` in the data folder.
+- **`--inspect-self`** reports `fileTier`: `verified` or `generic`.
+- **Tests.** `e2e/generic.mjs` (app `bridge-e`, one page per tier) and `e2e/generic-live.mjs` (live Excalidraw, weekly: tier 1 open and Ctrl+S save both pass). `pickInDialog` moved to `e2e/apps.mjs` and finds WebView2's own picker too.
+- **Known limits** (evidence section 6): tier 2 writing is a PC check, because a write through a picker handle gets no answer on the runners; hidden upload boxes are not filled.
 
-- `fileTier` in `--inspect-self`;
-- the tier labels;
-- the one-time notice for tiers 3 and 4.
+## Immediate next step: E, association registration
 
-Follow D2 and D3's pattern: a local test site per tier in CI, live where a real site matters, and a review before merging.
+E is not specced. Start by brainstorming its spec with the user, from the base design and the D spec's "Open items for later sub-projects":
 
-Still open from earlier sub-projects:
+- HKCU registration and "Open with", so double-clicking a `.psd` or `.md` launches the matching app (the double-click halves of gates 4 and 5);
+- `"%1"` per file or a multi-file form (D1 accepts up to 16 files either way);
+- whether registering one architecture build covers both;
+- the first-launch offer.
 
-- C's note that both architecture builds share one app's storage folder is handled: they share the pipe too.
-- Ctrl+S on real sites needs the user's PC for a hands-on run (`docs/windows-runs/`).
+Also open:
+
+- the hands-on PC run queued in `docs/windows-runs/NEXT.md` (D1-D4), not yet run;
+- `feat/generic-sites` is not merged to `main` yet.
 
 ## How work runs now (since 2026-11-19)
 
@@ -195,6 +204,6 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
 
-Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. D2 closed the save half of gate 5, and D3 the save half of gate 4. The "Open with" and double-click halves of gates 4 and 5 belong to E and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
+Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. D2 closed the save half of gate 5, and D3 the save half of gate 4. D4 closes no gate. The "Open with" and double-click halves of gates 4 and 5 belong to E and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
 
 One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.
