@@ -75,6 +75,8 @@ run(async () => {
   fs.rmSync(flag, { force: true });
   const e = launch(APP_E, DEBUG_E);
   const page = await attach(DEBUG_E, HOME);
+  // A navigation the page starts during the app's own first load is dropped.
+  await page.loaded(HOME);
   const go = async (origin, pathname) => {
     await page.evaluate(`location.href = ${JSON.stringify(origin + pathname)}`);
     await until(
