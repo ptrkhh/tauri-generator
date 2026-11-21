@@ -27,7 +27,8 @@ use webview2_com::{
 };
 use webwrap_bridge::{
     check_file, handle_refusal, parse_page_message, protected_folders, resolve, save_signature_ok,
-    AfterRead, Delivery, PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
+    AfterRead, Delivery, PageMessage, Refusal, Session, Transport, LEAVING_TIMEOUT, MAX_FILES,
+    MAX_FILE_BYTES,
 };
 use webwrap_spec::{Adapter, Assoc};
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
@@ -295,7 +296,7 @@ impl Bridge {
 
     fn on_message(&self, message: PageMessage, source: &str, live: &str) {
         match message {
-            PageMessage::Ready => {
+            PageMessage::Ready { .. } => {
                 let ready = self.session().ready(source, live);
                 match ready {
                     Ok(deliveries) => {
@@ -368,6 +369,8 @@ impl Bridge {
                     }
                 }
             }
+            // Honoured from Task 2 of the D4 plan.
+            PageMessage::FileTier { .. } => report::log("file-tier-refused not supported yet"),
             PageMessage::PickFile => {
                 if self.adapter != Adapter::Photopea {
                     return report::log("pick-file-refused this app has no Photopea adapter");
@@ -470,7 +473,9 @@ impl Bridge {
             return;
         };
         // Decided immediately before posting.
-        let after = self.session().delivery_read(delivery.token, &live);
+        let after = self
+            .session()
+            .delivery_read(delivery.token, &live, Transport::Buffer);
         match after {
             AfterRead::Post => {
                 let info = json!({
@@ -505,7 +510,9 @@ impl Bridge {
         }
         let live = with_ui(|ui| live_source(&ui.webview)).ok_or("the window is gone")?;
         // Decided immediately before posting.
-        let after = self.session().delivery_read(delivery.token, &live);
+        let after = self
+            .session()
+            .delivery_read(delivery.token, &live, Transport::Handle);
         if let AfterRead::Retry(more) = after {
             self.start(more);
             return Ok(());

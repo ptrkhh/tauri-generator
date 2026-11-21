@@ -4,7 +4,7 @@ Spec: [`docs/superpowers/specs/2026-11-20-file-bridge-and-adapters-design.md`](.
 
 ## Status
 
-Not started. Written 2026-11-21.
+Task 1 done 2026-11-21. Written 2026-11-21.
 
 ## Goal
 
@@ -68,7 +68,7 @@ As D1-D3:
 - `PageMessage::Ready { want: Option<Want> }` with `Want::{Handle, Buffer}`. `PageMessage::FileTier { token, tier }`, where serde accepts only 1 or 3.
 - `Session` remembers how each token was delivered (handle or buffer) and gets `file_tier(source, live, token, tier) -> Result<&str, Refusal>`, which accepts tier 1 only after a handle and tier 3 only after a buffer (clarification 8). It returns the file's name.
 - `Tier::{Verified, LaunchQueue, NativePicker, Upload, Unsupported}` with `label()`: "verified write-back", "best effort", "best effort", "open only", "unsupported".
-- `transport(adapter, want, handle_refusal: Option<&str>) -> Transport::{Handle, Buffer}`: `vscodeDev` always uses a handle (its refusal stays an error, as today), `photopea` always a buffer, and `none` uses a handle only if it was wanted and the path allows one.
+- `transport(adapter, want, handle_allowed: bool) -> Transport::{Handle, Buffer}`, where `handle_allowed` is `handle_refusal(...).is_none()`: `vscodeDev` always uses a handle (its refusal stays an error, as today), `photopea` always a buffer, and `none` uses a handle only if it was wanted and the path allows one.
 - Tests:
   - `ready` with and without `want`, and with an unknown `want`;
   - `file-tier` with tiers 1 and 3, and refusing 0, 2, 4 and a non-number;
