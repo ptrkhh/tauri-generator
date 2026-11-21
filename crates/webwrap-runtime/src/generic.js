@@ -38,6 +38,16 @@
     }),
   });
 
+  // Sites test for both names before using launchQueue.
+  const Params = window.LaunchParams ?? class LaunchParams {};
+  if (!('LaunchParams' in window)) {
+    Object.defineProperty(window, 'LaunchParams', { configurable: true, writable: true, value: Params });
+  }
+  const launchParams = (handle) => Object.freeze(Object.create(Params.prototype, {
+    files: { enumerable: true, value: Object.freeze([handle]) },
+    targetURL: { enumerable: true, value: location.href },
+  }));
+
   const loaded = new Promise((resolve) => {
     if (document.readyState === 'complete') resolve();
     else window.addEventListener('load', resolve, { once: true });
@@ -48,15 +58,21 @@
   bridge.addEventListener('message', (event) => {
     if (event.data?.type !== 'webwrap-file-handle') return;
     const handle = event.additionalObjects?.[0];
-    if (!(handle instanceof FileSystemFileHandle) || !consumer) return;
     const token = event.data.token;
-    try {
-      consumer(Object.freeze({ files: Object.freeze([handle]), targetURL: location.href }));
-      post({ type: 'webwrap-file-tier', token, tier: 1 });
-    } catch (error) {
-      console.error('webwrap: the launchQueue consumer failed', error);
+    if (!(handle instanceof FileSystemFileHandle) || !consumer) {
       post({ type: 'webwrap-open-failed', tokens: [token] });
+      return;
     }
+    // Consumers are often async: the tier is reported once it has settled.
+    Promise.resolve()
+      .then(() => consumer(launchParams(handle)))
+      .then(
+        () => post({ type: 'webwrap-file-tier', token, tier: 1 }),
+        (error) => {
+          console.error('webwrap: the launchQueue consumer failed', error);
+          post({ type: 'webwrap-open-failed', tokens: [token] });
+        },
+      );
   });
 
   const visible = (input) => !input.disabled && input.getClientRects().length > 0;
@@ -92,12 +108,19 @@
     const info = event.additionalData;
     if (info?.type !== 'webwrap-file') return;
     const buffer = event.getBuffer();
-    const file = new File([new Uint8Array(buffer, 0, info.size).slice()], info.name);
-    // Released after this dispatch, so other listeners on the page can still
-    // read the buffer synchronously.
-    setTimeout(() => bridge.releaseBuffer(buffer), 0);
-    await loaded;
-    post(offer(file)
+    let file = null;
+    try {
+      // The File constructor copies the bytes; there is no need for another copy.
+      file = new File([new Uint8Array(buffer, 0, info.size)], info.name);
+    } catch (error) {
+      console.error('webwrap: the file could not be copied', error);
+    } finally {
+      // Released after this dispatch, so other listeners on the page can
+      // still read the buffer synchronously.
+      setTimeout(() => bridge.releaseBuffer(buffer), 0);
+    }
+    if (file) await loaded;
+    post(file && offer(file)
       ? { type: 'webwrap-file-tier', token: info.token, tier: 3 }
       : { type: 'webwrap-open-failed', tokens: [info.token] });
   });

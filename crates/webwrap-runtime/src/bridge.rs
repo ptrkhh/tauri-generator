@@ -468,7 +468,9 @@ impl Bridge {
     fn start(&self, deliveries: Vec<Delivery>) {
         for delivery in deliveries {
             let allowed = handle_refusal(&delivery.path, &protected_folders()).is_none();
-            let started = match transport(self.adapter, *self.want(), allowed) {
+            // Bound first: a lock taken in the match would be held through it.
+            let want = *self.want();
+            let started = match transport(self.adapter, want, allowed) {
                 Transport::Handle => self.post_handle(&delivery),
                 Transport::Buffer => self.begin_read(&delivery),
             };
