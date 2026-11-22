@@ -27,7 +27,8 @@ use webview2_com::{
 };
 use webwrap_bridge::{
     check_file, handle_refusal, parse_page_message, protected_folders, resolve, save_signature_ok,
-    AfterRead, Delivery, PageMessage, Refusal, Session, LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
+    transport, AfterRead, Delivery, PageMessage, Refusal, Session, Tier, Transport, Want,
+    LEAVING_TIMEOUT, MAX_FILES, MAX_FILE_BYTES,
 };
 use webwrap_spec::{Adapter, Assoc};
 use windows::core::{Interface, BOOL, HSTRING, PWSTR};
@@ -105,6 +106,13 @@ pub struct Bridge {
     associations: Arc<Vec<Assoc>>,
     /// The open dialog is showing; a second request is refused.
     picking: Arc<AtomicBool>,
+    /// How the current document asked for files (`adapter: none` only).
+    /// Cleared with each new document, as the session clears readiness.
+    want: Arc<Mutex<Option<Want>>>,
+    /// The app's name, for messages about the site.
+    site: Arc<str>,
+    /// Exists once the open-only notice has been shown (D4).
+    notice_flag: Arc<PathBuf>,
 }
 
 /// What the page is told when a write fails. The reason, which names local
@@ -121,6 +129,8 @@ impl Bridge {
         adapter: Adapter,
         associations: Vec<Assoc>,
         files: Vec<PathBuf>,
+        site: &str,
+        data_dir: &Path,
     ) -> tauri::Result<Self> {
         let bridge = Bridge {
             window: window.clone(),
@@ -131,6 +141,9 @@ impl Bridge {
             adapter,
             associations: Arc::new(associations),
             picking: Arc::new(AtomicBool::new(false)),
+            want: Arc::new(Mutex::new(None)),
+            site: site.into(),
+            notice_flag: Arc::new(data_dir.join("open-only-notice")),
         };
         let installer = bridge.clone();
         window.with_webview(move |platform| {
@@ -156,6 +169,12 @@ impl Bridge {
             }
         })?;
         Ok(bridge)
+    }
+
+    fn want(&self) -> MutexGuard<'_, Option<Want>> {
+        self.want
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn session(&self) -> MutexGuard<'_, Session> {
@@ -222,6 +241,7 @@ impl Bridge {
                     args.NavigationId(&mut id)?;
                     let source = live_source(&sender);
                     let navigated = bridge.session().document_changed(id, &source);
+                    *bridge.want() = None;
                     for token in navigated.dropped_saves {
                         close_buffer(token);
                     }
@@ -295,10 +315,13 @@ impl Bridge {
 
     fn on_message(&self, message: PageMessage, source: &str, live: &str) {
         match message {
-            PageMessage::Ready => {
+            PageMessage::Ready { want } => {
                 let ready = self.session().ready(source, live);
                 match ready {
                     Ok(deliveries) => {
+                        if self.adapter == Adapter::None {
+                            *self.want() = want;
+                        }
                         report::log(format_args!(
                             "page-ready {} queued; {source}",
                             deliveries.len()
@@ -335,9 +358,10 @@ impl Bridge {
                         "They are waiting. Choose File > Open File... in vscode.dev to open them.",
                     ),
                     Adapter::Photopea => ("Photopea", "It may not support their format."),
-                    Adapter::None => {
-                        return report::log("open-failed-refused this app has no adapter");
-                    }
+                    Adapter::None => (
+                        &*self.site,
+                        "This website may not support opening files from Windows.",
+                    ),
                 };
                 let named: Result<Vec<String>, Refusal> = {
                     let session = self.session();
@@ -365,6 +389,27 @@ impl Bridge {
                     Ok(_) => report::log("open-failed-refused no file was named"),
                     Err(refusal) => {
                         report::log(format_args!("open-failed-refused {refusal}; {source}"))
+                    }
+                }
+            }
+            PageMessage::FileTier { token, tier } => {
+                if self.adapter != Adapter::None {
+                    return report::log("file-tier-refused this app has an adapter");
+                }
+                let named = self
+                    .session()
+                    .file_tier(source, live, &token, tier)
+                    .map(str::to_owned);
+                match named {
+                    Ok(name) => {
+                        let number = if tier == Tier::Upload { 3 } else { 1 };
+                        report::log(format_args!("file-tier {number} {name} ({})", tier.label()));
+                        if tier == Tier::Upload {
+                            self.open_only_notice(&name);
+                        }
+                    }
+                    Err(refusal) => {
+                        report::log(format_args!("file-tier-refused {refusal}; {source}"))
                     }
                 }
             }
@@ -400,11 +445,34 @@ impl Bridge {
 
     // ---- Opening ---------------------------------------------------------
 
+    /// The first file a site takes as an upload explains, once per app, that
+    /// saving will not reach the original. Creating the flag file decides it,
+    /// so two uploads at once show one notice; if it cannot be created, the
+    /// notice shows again next time.
+    fn open_only_notice(&self, name: &str) {
+        let created = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&*self.notice_flag);
+        if matches!(&created, Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists) {
+            return;
+        }
+        report::log("open-only-notice shown");
+        let site = &self.site;
+        report::info_box_async(format!(
+            "{site} opened {name} as an upload. Saving in {site} downloads a copy; \
+             it does not change the original file.\n\nThis notice won't show again."
+        ));
+    }
+
     fn start(&self, deliveries: Vec<Delivery>) {
         for delivery in deliveries {
-            let started = match self.adapter {
-                Adapter::VscodeDev => self.post_handle(&delivery),
-                _ => self.begin_read(&delivery),
+            let allowed = handle_refusal(&delivery.path, &protected_folders()).is_none();
+            // Bound first: a lock taken in the match would be held through it.
+            let want = *self.want();
+            let started = match transport(self.adapter, want, allowed) {
+                Transport::Handle => self.post_handle(&delivery),
+                Transport::Buffer => self.begin_read(&delivery),
             };
             if let Err(error) = started {
                 self.delivery_failed(&delivery, error);
@@ -470,7 +538,9 @@ impl Bridge {
             return;
         };
         // Decided immediately before posting.
-        let after = self.session().delivery_read(delivery.token, &live);
+        let after = self
+            .session()
+            .delivery_read(delivery.token, &live, Transport::Buffer);
         match after {
             AfterRead::Post => {
                 let info = json!({
@@ -497,15 +567,33 @@ impl Bridge {
         }
     }
 
-    /// The `vscodeDev` delivery: a read-write handle instead of the bytes.
+    /// A read-write handle instead of the bytes: always for `vscodeDev`, and
+    /// for a generic site whose `launchQueue` consumer asked for one.
     fn post_handle(&self, delivery: &Delivery) -> Result<(), String> {
         // Told now, rather than by a security error inside vscode.dev.
         if let Some(reason) = handle_refusal(&delivery.path, &protected_folders()) {
             return Err(reason.into());
         }
+        // Created before the file counts as delivered, so a generic site can
+        // still be given the bytes instead.
+        let handle = with_ui(|ui| vscode::create_handle(&ui.environment.cast()?, &delivery.path))
+            .ok_or("the window is gone")?;
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(error) if self.adapter == Adapter::None => {
+                report::log(format_args!(
+                    "handle-refused {}: {error}; sending the bytes",
+                    delivery.name
+                ));
+                return self.begin_read(delivery);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         let live = with_ui(|ui| live_source(&ui.webview)).ok_or("the window is gone")?;
         // Decided immediately before posting.
-        let after = self.session().delivery_read(delivery.token, &live);
+        let after = self
+            .session()
+            .delivery_read(delivery.token, &live, Transport::Handle);
         if let AfterRead::Retry(more) = after {
             self.start(more);
             return Ok(());
@@ -518,7 +606,7 @@ impl Bridge {
         with_ui(|ui| {
             let environment = ui.environment.cast()?;
             let webview = ui.webview.cast()?;
-            vscode::post_handle(&environment, &webview, &delivery.path, &message.to_string())
+            vscode::post_handle(&environment, &webview, &handle, &message.to_string())
         })
         .ok_or("the window is gone")?
         .map_err(|error| error.to_string())?;

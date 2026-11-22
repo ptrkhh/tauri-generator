@@ -9,7 +9,7 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { attach, sleep, until } from './cdp.mjs';
-import { assert, check, forward, launch, logged, makeFile, required, run, sha256, work } from './apps.mjs';
+import { assert, check, forward, launch, logged, makeFile, pickInDialog, required, run, sha256, work } from './apps.mjs';
 import { makePsd } from './psd.mjs';
 
 const APP_D = required('WEBWRAP_E2E_APP_D');
@@ -149,81 +149,6 @@ const flipped = (bytes) => {
   return copy;
 };
 const pngBytes = (size) => Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(size, 7)]);
-
-/** Choose `file` in the app's open dialog, as a person would. Returns
- * "picked", or why it could not, having closed the dialog. */
-function pickInDialog(pid, file) {
-  // EnumWindows finds the dialog however UI Automation lists it. UI
-  // Automation does not expose the dialog's file-name box or Open button on
-  // the runners, but both are classic child windows with fixed control ids:
-  // 1148 for the file name and 1 for Open.
-  const script = `
-    $ErrorActionPreference = 'Stop'
-    Add-Type -TypeDefinition @'
-      using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
-      public static class OpenDialog {
-        delegate bool Visit(IntPtr window, IntPtr data);
-        [DllImport("user32.dll")] static extern bool EnumWindows(Visit visit, IntPtr data);
-        [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, Visit visit, IntPtr data);
-        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int size);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
-        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
-        [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr w, string l);
-        [DllImport("user32.dll")] static extern bool PostMessage(IntPtr window, uint message, IntPtr w, IntPtr l);
-        static string Class(IntPtr window) { var name = new StringBuilder(256); GetClassName(window, name, 256); return name.ToString(); }
-        static string Text(IntPtr window) { var text = new StringBuilder(256); GetWindowText(window, text, 256); return text.ToString(); }
-        public static IntPtr Find(uint pid) {
-          IntPtr found = IntPtr.Zero;
-          EnumWindows((window, data) => {
-            uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner == pid && IsWindowVisible(window) && Class(window) == "#32770" && Text(window) == "Open") found = window;
-            return true;
-          }, IntPtr.Zero);
-          return found;
-        }
-        static List<IntPtr> Children(IntPtr parent) {
-          var all = new List<IntPtr>();
-          EnumChildWindows(parent, (window, data) => { all.Add(window); return true; }, IntPtr.Zero);
-          return all;
-        }
-        public static string Pick(IntPtr dialog, string path) {
-          IntPtr name = IntPtr.Zero, open = IntPtr.Zero;
-          var seen = new StringBuilder();
-          foreach (var child in Children(dialog)) {
-            int id = GetDlgCtrlID(child);
-            string cls = Class(child);
-            if (id == 1148 || id == 1) seen.Append(cls + "#" + id + " ");
-            if (id == 1148 && cls == "Edit") name = child;
-            if (id == 1148 && name == IntPtr.Zero) {
-              foreach (var inner in Children(child)) if (Class(inner) == "Edit") name = inner;
-            }
-            if (id == 1 && cls == "Button") open = child;
-          }
-          if (name == IntPtr.Zero || open == IntPtr.Zero) return "no file-name box or Open button (" + seen + ")";
-          SendMessage(name, 0x000C, IntPtr.Zero, path);       // WM_SETTEXT
-          PostMessage(open, 0x00F5, IntPtr.Zero, IntPtr.Zero); // BM_CLICK
-          return "picked";
-        }
-        public static void Close(IntPtr dialog) { PostMessage(dialog, 0x0010, IntPtr.Zero, IntPtr.Zero); } // WM_CLOSE
-      }
-'@
-    $deadline = (Get-Date).AddSeconds(30)
-    do {
-      $dialog = [OpenDialog]::Find([uint32]$env:APP_PID)
-      if ($dialog -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 500 }
-    } until ($dialog -ne [IntPtr]::Zero -or (Get-Date) -gt $deadline)
-    if ($dialog -eq [IntPtr]::Zero) { 'no open dialog appeared'; exit }
-    Start-Sleep -Milliseconds 1000
-    $result = [OpenDialog]::Pick($dialog, $env:PICK_PATH)
-    if ($result -ne 'picked') { [OpenDialog]::Close($dialog) }
-    $result`;
-  return execFileSync('powershell', ['-NoProfile', '-Command', script], {
-    env: { ...process.env, APP_PID: String(pid), PICK_PATH: file },
-    timeout: 90000,
-  }).toString().trim();
-}
 
 run(async () => {
   const big = makePsd(7480, 7480); // 160 MiB

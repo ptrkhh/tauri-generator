@@ -75,6 +75,9 @@ jobs:
           & $gen generate --url vscode.dev --name "VS Code" --icon "$fx/twitter-blue.png" --out acceptance `
             --adapter vscodeDev --assoc .md text/markdown "Markdown document"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # A generic site with launchQueue and its own picker, for D4's PC checks.
+          & $gen generate --url excalidraw.com --name Excalidraw --icon "$fx/twitter-blue.png" --out acceptance
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           Copy-Item $env:WEBWRAP_TEMPLATE_X64 acceptance/unspecialized-template-x64.exe
           Copy-Item $env:WEBWRAP_TEMPLATE_ARM64 acceptance/unspecialized-template-arm64.exe
           Copy-Item $gen acceptance/
@@ -105,7 +108,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: End-to-end file bridge (D1, and D2 and D3 against local stand-ins)
+      - name: End-to-end file bridge (D1, D2 and D3 against local stand-ins, D4 against local test pages)
         shell: pwsh
         timeout-minutes: 30
         env:
@@ -124,6 +127,8 @@ jobs:
           & $gen generate --url https://localhost:8446/ --name "Bridge D" --slug bridge-d --icon "$fx/photopea-red.png" --out e2e-apps --adapter photopea `
             --assoc .psd image/vnd.adobe.photoshop "Photoshop document"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $gen generate --url https://localhost:8447/ --name "Bridge E" --slug bridge-e --icon "$fx/twitter-blue.png" --out e2e-apps
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           # A throwaway certificate for the test server; the apps accept it only
           # because the test passes --ignore-certificate-errors to WebView2.
           $cert = New-SelfSignedCertificate -DnsName localhost -CertStoreLocation Cert:\CurrentUser\My
@@ -134,9 +139,12 @@ jobs:
           $env:WEBWRAP_E2E_APP_B = (Resolve-Path "e2e-apps/bridge-b-$native.exe").Path
           $env:WEBWRAP_E2E_APP_C = (Resolve-Path "e2e-apps/bridge-c-$native.exe").Path
           $env:WEBWRAP_E2E_APP_D = (Resolve-Path "e2e-apps/bridge-d-$native.exe").Path
+          $env:WEBWRAP_E2E_APP_E = (Resolve-Path "e2e-apps/bridge-e-$native.exe").Path
           node e2e/bridge.mjs
           if ($LASTEXITCODE -ne 0) { exit 1 }
           node e2e/photopea.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node e2e/generic.mjs
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: End-to-end against live vscode.dev (D2)
         # Its own step, so a vscode.dev outage or change reads as this step
@@ -174,6 +182,24 @@ jobs:
           $env:WEBWRAP_E2E_APP_PHOTOPEA = (Resolve-Path "e2e-live/photopea-live-$native.exe").Path
           node e2e/photopea-live.mjs
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: End-to-end against live Excalidraw, a launchQueue site (D4)
+        # Its own step, as for vscode.dev: an Excalidraw outage or change reads
+        # as this step failing.
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          T: ${{ matrix.target }}
+        run: |
+          $native = if ($env:T -like 'aarch64*') { 'arm64' } else { 'x64' }
+          $gen = "target/$env:T/release/webwrap-generate.exe"
+          New-Item -ItemType Directory -Force e2e-live | Out-Null
+          & $gen generate --url https://excalidraw.com/ --name "Excalidraw Live" --slug excalidraw-live `
+            --icon docs/windows-runs/fixtures/twitter-blue.png --out e2e-live
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $env:WEBWRAP_E2E_APP_EXCALIDRAW = (Resolve-Path "e2e-live/excalidraw-live-$native.exe").Path
+          node e2e/generic-live.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Screenshot the desktop after a failure
         if: failure()
         shell: pwsh
@@ -191,5 +217,6 @@ jobs:
             ${{ runner.temp }}/failure.png
             ${{ runner.temp }}/vscode-live.png
             ${{ runner.temp }}/photopea-live.png
+            ${{ runner.temp }}/excalidraw-live.png
             ${{ runner.temp }}/open-dialog.png
           if-no-files-found: ignore

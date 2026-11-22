@@ -6,6 +6,7 @@
 pub mod ipc;
 pub mod paths;
 pub mod session;
+pub mod tier;
 
 pub use ipc::{encode_request, read_request, IpcError, MAX_MESSAGE_BYTES};
 pub use paths::{
@@ -16,3 +17,4 @@ pub use session::{
     parse_page_message, AfterRead, Delivery, Navigated, PageMessage, Refusal, Session,
     LEAVING_TIMEOUT,
 };
+pub use tier::{transport, Tier, Transport, Want};

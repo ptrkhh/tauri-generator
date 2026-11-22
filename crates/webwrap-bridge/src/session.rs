@@ -14,6 +14,7 @@ use serde::Deserialize;
 use webwrap_spec::is_trusted_origin;
 
 use crate::paths::{display_name, MAX_FILE_BYTES};
+use crate::tier::{Tier, Transport, Want};
 
 /// How long a pending untrusted navigation may hold deliveries back. It ends
 /// sooner when WebView2 reports the navigation finished or a new document; this
@@ -26,8 +27,9 @@ const MAX_PAGE_MESSAGE_BYTES: usize = 4096;
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type")]
 pub enum PageMessage {
+    /// `want` is honoured only for `adapter: none`; missing means a buffer.
     #[serde(rename = "webwrap-ready")]
-    Ready,
+    Ready { want: Option<Want> },
     #[serde(rename = "webwrap-save")]
     Save { token: String, size: u64 },
     /// `save` echoes the number in `webwrap-save-buffer`, so a late commit
@@ -41,6 +43,9 @@ pub enum PageMessage {
     /// The `photopea` shell asks for the native open dialog (Ctrl+O).
     #[serde(rename = "webwrap-pick-file")]
     PickFile,
+    /// A generic page's script says which tier took a delivered file.
+    #[serde(rename = "webwrap-file-tier")]
+    FileTier { token: String, tier: Tier },
 }
 
 /// Parse the JSON text a page posted as a string with
@@ -88,6 +93,7 @@ pub enum Refusal {
     Size,
     InFlight,
     NotAwaiting,
+    WrongTier,
 }
 
 impl fmt::Display for Refusal {
@@ -98,6 +104,7 @@ impl fmt::Display for Refusal {
             Self::Size => "the file must be between 1 byte and 4 GiB",
             Self::InFlight => "a save of this file is already in progress",
             Self::NotAwaiting => "no save of this file is waiting for its bytes",
+            Self::WrongTier => "the file was not delivered that way",
         })
     }
 }
@@ -120,6 +127,8 @@ struct Entry {
     path: PathBuf,
     name: String,
     state: State,
+    /// How it was last posted, once delivered.
+    via: Option<Transport>,
 }
 
 pub struct Session {
@@ -209,6 +218,7 @@ impl Session {
                 path,
                 name,
                 state: State::Queued,
+                via: None,
             },
         );
         if self.ready && self.may_post(live) {
@@ -245,8 +255,9 @@ impl Session {
             .collect()
     }
 
-    /// A delivery's bytes are ready. Decide immediately before posting.
-    pub fn delivery_read(&mut self, token: u64, live: &str) -> AfterRead {
+    /// A delivery is about to be posted `via` a handle or buffer. Decide
+    /// immediately before posting.
+    pub fn delivery_read(&mut self, token: u64, live: &str, via: Transport) -> AfterRead {
         let current = self.generation;
         let postable = self.may_post(live);
         let Some(entry) = self.entries.get_mut(&token) else {
@@ -255,6 +266,7 @@ impl Session {
         match entry.state {
             State::Delivering { generation } if generation == current && postable => {
                 entry.state = State::Delivered(Save::Idle);
+                entry.via = Some(via);
                 AfterRead::Post
             }
             State::Delivering { .. } => {
@@ -405,6 +417,30 @@ impl Session {
             _ => Err(Refusal::UnknownToken),
         }
     }
+
+    /// A generic page reports which tier took a delivered file. Tier 1 is
+    /// accepted only after a handle and tier 3 only after a buffer. Returns
+    /// the file's name.
+    pub fn file_tier(
+        &self,
+        source: &str,
+        live: &str,
+        token: &str,
+        tier: Tier,
+    ) -> Result<&str, Refusal> {
+        let name = self.delivered_name(source, live, token)?;
+        let expected = match tier {
+            Tier::LaunchQueue => Transport::Handle,
+            Tier::Upload => Transport::Buffer,
+            _ => return Err(Refusal::WrongTier),
+        };
+        let via = token.parse().ok().and_then(|id| self.entries.get(&id)?.via);
+        if via == Some(expected) {
+            Ok(name)
+        } else {
+            Err(Refusal::WrongTier)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -438,7 +474,10 @@ mod tests {
             started
         };
         let token = started.last().unwrap().token;
-        assert_eq!(session.delivery_read(token, HOME), AfterRead::Post);
+        assert_eq!(
+            session.delivery_read(token, HOME, Transport::Buffer),
+            AfterRead::Post
+        );
         token
     }
 
@@ -446,8 +485,31 @@ mod tests {
     fn page_messages_parse_and_anything_else_is_ignored() {
         assert_eq!(
             parse_page_message(r#"{"type":"webwrap-ready"}"#),
-            Some(PageMessage::Ready)
+            Some(PageMessage::Ready { want: None })
         );
+        assert_eq!(
+            parse_page_message(r#"{"type":"webwrap-ready","want":"handle"}"#),
+            Some(PageMessage::Ready {
+                want: Some(Want::Handle)
+            })
+        );
+        assert_eq!(
+            parse_page_message(r#"{"type":"webwrap-ready","want":"buffer"}"#),
+            Some(PageMessage::Ready {
+                want: Some(Want::Buffer)
+            })
+        );
+        for (tier, expected) in [(1, Tier::LaunchQueue), (3, Tier::Upload)] {
+            assert_eq!(
+                parse_page_message(&format!(
+                    r#"{{"type":"webwrap-file-tier","token":"3","tier":{tier}}}"#
+                )),
+                Some(PageMessage::FileTier {
+                    token: "3".into(),
+                    tier: expected
+                })
+            );
+        }
         assert_eq!(
             parse_page_message(r#"{"type":"webwrap-save","token":"3","size":12}"#),
             Some(PageMessage::Save {
@@ -478,12 +540,66 @@ mod tests {
             r#"{"type":"webwrap-save","token":"3","size":-1}"#,
             r#"{"type":"webwrap-save","token":"3","size":1.5}"#,
             r#"{"type":"webwrap-save-commit","token":"3"}"#,
+            r#"{"type":"webwrap-ready","want":"bytes"}"#,
+            r#"{"type":"webwrap-file-tier","token":"3","tier":0}"#,
+            r#"{"type":"webwrap-file-tier","token":"3","tier":2}"#,
+            r#"{"type":"webwrap-file-tier","token":"3","tier":4}"#,
+            r#"{"type":"webwrap-file-tier","token":"3","tier":"1"}"#,
+            r#"{"type":"webwrap-file-tier","token":"3"}"#,
             "not json",
         ] {
             assert_eq!(parse_page_message(other), None, "{other}");
         }
         let padded = format!(r#"{{"type":"webwrap-ready","pad":"{}"}}"#, "x".repeat(5000));
         assert_eq!(parse_page_message(&padded), None);
+    }
+
+    #[test]
+    fn a_tier_is_accepted_only_for_how_the_file_was_delivered() {
+        let mut s = session();
+        let buffer = delivered(&mut s, "a.png");
+        // The page is ready now, so opening starts the delivery at once.
+        let handle = s.open(path("b.excalidraw"), HOME)[0].token;
+        assert_eq!(
+            s.delivery_read(handle, HOME, Transport::Handle),
+            AfterRead::Post
+        );
+        let (buffer, handle) = (buffer.to_string(), handle.to_string());
+
+        assert_eq!(s.file_tier(HOME, HOME, &buffer, Tier::Upload), Ok("a.png"));
+        assert_eq!(
+            s.file_tier(HOME, HOME, &handle, Tier::LaunchQueue),
+            Ok("b.excalidraw")
+        );
+        assert_eq!(
+            s.file_tier(HOME, HOME, &buffer, Tier::LaunchQueue),
+            Err(Refusal::WrongTier)
+        );
+        assert_eq!(
+            s.file_tier(HOME, HOME, &handle, Tier::Upload),
+            Err(Refusal::WrongTier)
+        );
+        assert_eq!(
+            s.file_tier(HOME, HOME, &buffer, Tier::Unsupported),
+            Err(Refusal::WrongTier)
+        );
+        assert_eq!(
+            s.file_tier(AWAY, HOME, &buffer, Tier::Upload),
+            Err(Refusal::Untrusted)
+        );
+
+        // Started but not yet delivered.
+        let queued = s.open(path("c.png"), HOME)[0].token.to_string();
+        assert_eq!(
+            s.file_tier(HOME, HOME, &queued, Tier::Upload),
+            Err(Refusal::UnknownToken)
+        );
+        // Revoked by an untrusted document.
+        s.document_changed(NAV, AWAY);
+        assert_eq!(
+            s.file_tier(HOME, HOME, &buffer, Tier::Upload),
+            Err(Refusal::UnknownToken)
+        );
     }
 
     #[test]
@@ -516,10 +632,16 @@ mod tests {
         s.open(path("a.psd"), HOME);
         let token = s.ready(HOME, HOME).unwrap()[0].token;
         s.document_changed(NAV, "https://app.test/reload");
-        assert_eq!(s.delivery_read(token, HOME), AfterRead::Retry(vec![]));
+        assert_eq!(
+            s.delivery_read(token, HOME, Transport::Buffer),
+            AfterRead::Retry(vec![])
+        );
         // The new document announces itself and gets the file.
         assert_eq!(s.ready(HOME, HOME).unwrap()[0].token, token);
-        assert_eq!(s.delivery_read(token, HOME), AfterRead::Post);
+        assert_eq!(
+            s.delivery_read(token, HOME, Transport::Buffer),
+            AfterRead::Post
+        );
     }
 
     #[test]
@@ -527,7 +649,10 @@ mod tests {
         let mut s = session();
         s.open(path("a.psd"), HOME);
         let token = s.ready(HOME, HOME).unwrap()[0].token;
-        assert_eq!(s.delivery_read(token, AWAY), AfterRead::Retry(vec![]));
+        assert_eq!(
+            s.delivery_read(token, AWAY, Transport::Buffer),
+            AfterRead::Retry(vec![])
+        );
     }
 
     #[test]
@@ -603,7 +728,10 @@ mod tests {
         // The live source still reads trusted: the new document does not exist yet.
         s.navigation_starting(7, AWAY);
         assert!(!s.may_post(HOME));
-        assert_eq!(s.delivery_read(token, HOME), AfterRead::Retry(vec![]));
+        assert_eq!(
+            s.delivery_read(token, HOME, Transport::Buffer),
+            AfterRead::Retry(vec![])
+        );
         assert!(s.open(path("b.psd"), HOME).is_empty());
         // It turned into a download, or was cancelled: the page stays and gets both.
         let started = s.navigation_completed(7, HOME);

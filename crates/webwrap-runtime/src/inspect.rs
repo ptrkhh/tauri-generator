@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use serde_json::{json, Value};
-use webwrap_spec::{nav_verdict, AppSpec, NavEvent, Verdict};
+use webwrap_spec::{nav_verdict, Adapter, AppSpec, NavEvent, Verdict};
 
 fn verdict_name(verdict: Verdict) -> &'static str {
     match verdict {
@@ -34,6 +34,11 @@ pub fn run(spec: &AppSpec, data_dir: &Path, check_urls: &[String]) -> ! {
         "launchUrl": spec.launch_url,
         "trustedOrigins": spec.trusted_origins,
         "adapter": spec.adapter,
+        // The app's kind, for F's label; which tier takes a file is per file.
+        "fileTier": match spec.adapter {
+            Adapter::None => "generic",
+            Adapter::Photopea | Adapter::VscodeDev => "verified",
+        },
         "fileAssociations": spec.file_associations,
         "dnsMode": spec.dns_mode,
         "appVersion": spec.app_version,

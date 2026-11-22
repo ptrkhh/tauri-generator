@@ -5,6 +5,7 @@ compile_error!("webwrap-runtime must be built and run on Windows");
 
 mod bridge;
 mod embedded_spec;
+mod generic;
 mod hardening;
 mod inspect;
 mod photopea;
@@ -210,14 +211,16 @@ fn run(
                         .use_https_scheme(true)
                         .initialization_script(photopea_script);
                 }
-                Adapter::None => {}
+                Adapter::None => {
+                    builder = builder.initialization_script(generic::script(&trusted_origins));
+                }
             }
             let window = builder
-                .title(title)
+                .title(&title)
                 // Every generated app shares this compiled runtime and its
                 // tauri.conf.json identifier, so without this they would all
                 // share Tauri's default WebView2 folder.
-                .data_directory(data_dir)
+                .data_directory(data_dir.clone())
                 .on_navigation(|url| nav_verdict(url.as_str(), NavEvent::TopLevel).is_allow())
                 // Let a dropped file reach the site, as in a browser. Tauri's
                 // own handler would swallow it.
@@ -236,14 +239,21 @@ fn run(
             if let Ok(hwnd) = window.hwnd() {
                 use_main_icon(hwnd);
             }
-            let bridge =
-                match Bridge::install(&window, bridge_origins, adapter, associations, files) {
-                    Ok(bridge) => bridge,
-                    Err(error) => report::abort(
-                        &format!("this app's safety checks could not be installed: {error}"),
-                        true,
-                    ),
-                };
+            let bridge = match Bridge::install(
+                &window,
+                bridge_origins,
+                adapter,
+                associations,
+                files,
+                &title,
+                &data_dir,
+            ) {
+                Ok(bridge) => bridge,
+                Err(error) => report::abort(
+                    &format!("this app's safety checks could not be installed: {error}"),
+                    true,
+                ),
+            };
             // Closing waits for a save being written: the process ends with
             // the window, which would kill the write half done.
             let holder = bridge.clone();

@@ -1,6 +1,6 @@
 # File Bridge and Adapters Design (sub-project D)
 
-Date: 2026-11-20. Status: approved by the user 2026-11-20. D1 is implemented (plan `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md`, evidence `docs/evidence/2026-11-20-file-bridge-plumbing.md`). D2 is implemented (plan `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md`, evidence `docs/evidence/2026-11-20-vscode-dev-adapter.md`), and D3 is implemented (plan `docs/superpowers/plans/2026-11-20-photopea-adapter.md`, evidence `docs/evidence/2026-11-20-photopea-adapter.md`). Their plans record where they depart from the sections below. D4 is next.
+Date: 2026-11-20. Status: approved by the user 2026-11-20. D1 is implemented (plan `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md`, evidence `docs/evidence/2026-11-20-file-bridge-plumbing.md`). D2 is implemented (plan `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md`, evidence `docs/evidence/2026-11-20-vscode-dev-adapter.md`), D3 is implemented (plan `docs/superpowers/plans/2026-11-20-photopea-adapter.md`, evidence `docs/evidence/2026-11-20-photopea-adapter.md`), and D4 is implemented (plan `docs/superpowers/plans/2026-11-21-generic-sites.md`, evidence `docs/evidence/2026-11-21-generic-sites.md`). Their plans record where they depart from the sections below. D is complete.
 
 ## Summary
 
@@ -53,7 +53,7 @@ app.exe --inspect-self [--check-url <url>]...
 - It takes up to 16 file paths.
 - Each must exist and be a regular file. It is canonicalized and turned into a file token (below).
 - A bad path shows a message box naming it. The app still opens without it.
-- `--inspect-self` gains `fileTier`: the tier the app would use, `adapter`, `pwa`, `picker`, `upload`, or `unsupported`. Tests assert it.
+- `--inspect-self` gains `fileTier` (in D4): `verified` for the `vscodeDev` and `photopea` adapters, `generic` otherwise. Which tier takes a file is decided per file by the page, so the app cannot report it up front. Tests assert it.
 
 ### Single instance and IPC (gates 6 and 7)
 
