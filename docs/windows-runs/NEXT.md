@@ -1,18 +1,18 @@
 # Next Windows run: D1 file plumbing, D2 vscode.dev, D3 Photopea, D4 generic sites, hands-on checks
 
-Branch `feat/generic-sites`. Plans:
+Branch `main`. Plans:
 
 - `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md` (D1, merged);
 - `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md` (D2, merged);
 - `docs/superpowers/plans/2026-11-20-photopea-adapter.md` (D3, merged);
-- `docs/superpowers/plans/2026-11-21-generic-sites.md` (D4).
+- `docs/superpowers/plans/2026-11-21-generic-sites.md` (D4, merged).
 
 CI already drove all four end to end on x64 and ARM64, including live vscode.dev, live Photopea with a 150 MB PSD, and live Excalidraw. This run checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
 
 ## 1. Get the apps
 
 1. Find the CI run:
-   `gh run list --repo ptrkhh/tauri-generator --branch feat/generic-sites --workflow windows --status success --limit 5 --json databaseId,headSha,url`
+   `gh run list --repo ptrkhh/tauri-generator --branch main --workflow windows --status success --limit 5 --json databaseId,headSha,url`
    Use the run whose `headSha` equals `git rev-parse HEAD`. If none does, stop and report "CI has not passed for this commit yet".
 2. Make a new empty folder `%TEMP%\webwrap-run-<timestamp>` and download this PC's artifact into it:
    - The artifact is `acceptance-aarch64-pc-windows-msvc` if `$env:PROCESSOR_ARCHITECTURE` is `ARM64`, otherwise `acceptance-x86_64-pc-windows-msvc`.

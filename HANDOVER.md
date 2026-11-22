@@ -178,8 +178,7 @@ E is not specced. Start by brainstorming its spec with the user, from the base d
 
 Also open:
 
-- the hands-on PC run queued in `docs/windows-runs/NEXT.md` (D1-D4), not yet run;
-- `feat/generic-sites` is not merged to `main` yet.
+- the hands-on PC run queued in `docs/windows-runs/NEXT.md` (D1-D4), not yet run.
 
 ## How work runs now (since 2026-11-19)
 
