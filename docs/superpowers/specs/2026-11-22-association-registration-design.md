@@ -16,7 +16,7 @@ No schema, pack, or generator change: `fileAssociations` is already in the spec 
 
 | Question | Decision | Source |
 | --- | --- | --- |
-| Scope | HKCU only: `HKCU\Software\Classes\...` plus per-extension `OpenWithProgids` entries. No elevation, per user, per machine | Base design ("for the current user") |
+| Scope | HKCU only: `HKCU\Software\Classes\...`, the ProgID plus a value in each extension's `HKCU\Software\Classes\.<ext>\OpenWithProgids`. No elevation, per user, per machine | Base design ("for the current user") |
 | Default app | Never write `UserChoice`, `UserPreferencesHash`, or `MRUList`. Only add this app's ProgID value under each extension's `OpenWithProgids` | Base design ("Windows controls default-application selection") |
 | Command form | `"<exe path>" "%1"`, one process per file. Explorer's Open with always passes exactly one file; multi-select launches several processes, and D1's single-instance forwarding merges them into the running window (gate 6, proven). This answers D's open item: no multi-file form | D spec open items; D1 |
 | Architecture coverage | Each exe registers itself (`GetModuleFileNameW`) under one shared ProgID `webwrap.<app-id>`. One build does not register the other; last registered wins, and the one you run is the one that registered. A moved or regenerated exe re-offers, so the path follows the exe. This answers D's other open item | D spec open items; base design ("moving may require registering again") |
@@ -38,9 +38,11 @@ HKCU\Software\Classes\webwrap.<app-id>
     Application\ApplicationName  = "<display name>"
     shell\open\command           = "<exe path>" "%1"
 
-HKCU\...\Explorer\FileExts\<ext>\OpenWithProgids
+HKCU\Software\Classes\.<ext>\OpenWithProgids
     webwrap.<app-id>             = ""   (REG_SZ, one per association)
 ```
+
+This is the documented place for an app's Open with entry ("How to include an application in the Open With dialog box"). `HKCU\...\Explorer\FileExts\.<ext>` is Explorer's own per-user state, where `UserChoice` lives, and E writes nothing there. After any change, register or unregister calls `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, null, null)` so Explorer drops its cached associations without a sign-out.
 
 `registered here` means `shell\open\command` reads back byte-equal to the quoted current exe path plus ` "%1"`. Unregistration deletes the ProgID tree, and per extension deletes only the value named `webwrap.<app-id>` — never the `OpenWithProgids` key itself, never a foreign value, never `UserChoice`.
 
@@ -58,7 +60,8 @@ HKCU\...\Explorer\FileExts\<ext>\OpenWithProgids
 - `registered_here(spec, exe_path)`: one `RegGetValueW` of the command string, byte comparison. Runs at every launch before the window; the cost is one open of a local key.
 - `unregister(spec)`: remove exactly the app's own tree and its own-named `OpenWithProgids` values. Uses `RegDeleteTreeW` for the ProgID; `RegDeleteKeyValueW` per extension.
 - CLI: in `parse_args`, `--register-associations` and `--unregister-associations` join `--inspect-self` as first-argument-only modes. They load the embedded spec, act, print one line to stdout, and exit. A run with no associations reports that and exits 0.
-- Needs the `Win32_System_Registry` feature of the `windows` crate.
+- Both register and unregister end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
+- Needs the `Win32_System_Registry` feature of the `windows` crate (`Win32_UI_Shell` is already on).
 
 ### E2: first-launch offer
 
