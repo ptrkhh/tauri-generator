@@ -40,7 +40,7 @@
       const { file, resolve } = expecting;
       expecting = null;
       resolve();
-      return take(file);
+      if (file) return take(file);
     }
     if (!running && queue.length > 0) {
       const handles = take(queue[0]);
@@ -110,7 +110,8 @@
     return tab !== before && label === name && !!document.activeElement?.closest('.monaco-editor');
   };
 
-  /** Run "Open File..." until vscode.dev takes `file`, for up to 30 s. A run
+  /** Run "Open File..." until vscode.dev takes `file` (null: the user's own
+   * pick), for up to 30 s. A run
    * that vscode.dev interrupts by moving focus, as it does while it starts,
    * starts again: nothing it does can type into a document. */
   async function runOpenFile(file) {
@@ -137,7 +138,7 @@
       }
       // Let vscode.dev show this file and focus its editor before the next
       // run opens the palette.
-      await waitFor(() => showing(file.name, before), 10000);
+      if (file) await waitFor(() => showing(file.name, before), 10000);
       return true;
     }
     return false;
@@ -159,6 +160,18 @@
       running = false;
     }
   }
+
+  // vscode.dev binds Ctrl+O to both Open File and Open Folder, and Open
+  // Folder wins, so the user's own Ctrl+O runs Open File instead. This runs
+  // before vscode.dev's listeners, and the keystroke's user activation lets
+  // the native picker open.
+  window.addEventListener('keydown', (event) => {
+    if (!event.isTrusted || event.code !== 'KeyO' || !event.ctrlKey
+      || event.shiftKey || event.altKey || event.metaKey) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!running) runOpenFile(null);
+  }, true);
 
   bridge.addEventListener('message', (event) => {
     if (event.data?.type !== 'webwrap-file-handle') return;

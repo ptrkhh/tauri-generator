@@ -8,7 +8,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { attach, until } from './cdp.mjs';
-import { assert, check, forward, launch, logged, makeFile, outside, required, run } from './apps.mjs';
+import {
+  assert, check, forward, launch, logged, makeFile, outside, pickInDialog, required, run,
+} from './apps.mjs';
 
 const APP = required('WEBWRAP_E2E_APP_VSCODE');
 const HOME = 'https://vscode.dev';
@@ -94,5 +96,15 @@ run(async () => {
     await editAndSave(page, three, 'changed');
     assert(fs.readFileSync(one, 'utf8') === 'after\r\n', 'live-one.md changed too');
     assert(fs.readFileSync(two, 'utf8') === 'second\r\n', 'live-two.md changed too');
+  }, explain(page));
+
+  // vscode.dev binds Ctrl+O to Open Folder too; the adapter makes it Open File.
+  // Saving through a picked handle waits on a permission prompt: a PC check.
+  await check('Ctrl+O opens a file through the Windows Open dialog', async () => {
+    const picked = makeFile('live-picked.md', 'picked\r\n', outside);
+    await key(page, 2, 'o', 'KeyO', 79);
+    const outcome = pickInDialog(app.pid, picked);
+    assert(outcome === 'picked', `the Open dialog: ${outcome}`);
+    await showing(page, 'live-picked.md', 'picked');
   }, explain(page));
 });
