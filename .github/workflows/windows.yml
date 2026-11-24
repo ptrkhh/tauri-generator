@@ -93,6 +93,8 @@ jobs:
         run: |
           $native = if ($env:T -like 'aarch64*') { 'arm64' } else { 'x64' }
           $apps = @{ photopea = '873756fbe97a1384'; twitter = '2fa5e3f40150278f' }
+          # Decline E's first-launch association offer up front: its box would hold the window back.
+          foreach ($id in $apps.Values) { New-Item -Force -ItemType File (Join-Path $env:LOCALAPPDATA "WebWrap\$id\assoc-declined") | Out-Null }
           $procs = foreach ($slug in $apps.Keys) { Start-Process (Resolve-Path "acceptance/$slug-$native.exe") -PassThru }
           Start-Sleep -Seconds 20
           foreach ($p in $procs) { if ($p.HasExited) { throw "$($p.ProcessName) exited early with $($p.ExitCode)" } }

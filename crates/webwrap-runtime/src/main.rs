@@ -3,6 +3,7 @@
 #[cfg(not(windows))]
 compile_error!("webwrap-runtime must be built and run on Windows");
 
+mod assoc;
 mod bridge;
 mod embedded_spec;
 mod generic;
@@ -35,13 +36,26 @@ use crate::single_instance::{Forwarded, Role};
 enum Mode {
     Run { files: Vec<OsString> },
     InspectSelf { check_urls: Vec<String> },
+    Associations { register: bool },
 }
 
-/// Parse arguments: `--inspect-self [--check-url <url>]...`, or files.
+/// Parse arguments: `--inspect-self [--check-url <url>]...`,
+/// `--register-associations`, `--unregister-associations`, or files.
 ///
 /// Every other argument is a file, including one that starts with `--`, so a
 /// dropped file never becomes a usage error. Explorer passes absolute paths.
 fn parse_args(args: Vec<OsString>) -> Result<Mode, String> {
+    for (flag, register) in [
+        ("--register-associations", true),
+        ("--unregister-associations", false),
+    ] {
+        if args.first().is_some_and(|first| first == flag) {
+            if args.len() > 1 {
+                return Err(format!("{flag} takes no other arguments"));
+            }
+            return Ok(Mode::Associations { register });
+        }
+    }
     if args.first().is_none_or(|first| first != "--inspect-self") {
         return Ok(Mode::Run { files: args });
     }
@@ -173,6 +187,7 @@ fn run(
     let trusted_origins = spec.trusted_origins;
     let adapter = spec.adapter;
     let associations = spec.file_associations;
+    let app_id = spec.app_id;
     // Photopea runs inside the runtime's own shell page, which is then the
     // only page the bridge trusts; every other adapter trusts the site.
     let (start, bridge_origins) = match adapter {
@@ -191,8 +206,9 @@ fn run(
     // its files wait in the channel until the bridge is ready.
     let (forwarded, inbox) = mpsc::channel();
     if let Some(pipe) = pipe {
-        single_instance::serve(pipe, spec.app_id, forwarded);
+        single_instance::serve(pipe, app_id.clone(), forwarded);
     }
+    assoc::offer(&app_id, &title, &associations, &data_dir);
 
     let result = tauri::Builder::default()
         .setup(move |app| {
@@ -307,6 +323,12 @@ fn main() {
 
     let files = match mode {
         Mode::InspectSelf { check_urls } => inspect::run(&spec, &data_dir, &check_urls),
+        Mode::Associations { register } => assoc::run_flag(
+            &spec.app_id,
+            &spec.display_name,
+            &spec.file_associations,
+            register,
+        ),
         Mode::Run { files } => files,
     };
     let (files, bad) = resolve_files(&files);
@@ -389,8 +411,26 @@ mod tests {
             Mode::InspectSelf { check_urls } => {
                 assert_eq!(check_urls, ["https://a.test/", "http://b.test/"]);
             }
-            Mode::Run { .. } => panic!("expected inspect mode"),
+            _ => panic!("expected inspect mode"),
         }
+    }
+
+    #[test]
+    fn association_flags_stand_alone() {
+        assert!(matches!(
+            parse_args(args(&["--register-associations"])).unwrap(),
+            Mode::Associations { register: true }
+        ));
+        assert!(matches!(
+            parse_args(args(&["--unregister-associations"])).unwrap(),
+            Mode::Associations { register: false }
+        ));
+        assert!(parse_args(args(&["--register-associations", "x.psd"])).is_err());
+        // Only as the first argument; later it is a file name like any other.
+        assert!(matches!(
+            parse_args(args(&["x.psd", "--register-associations"])).unwrap(),
+            Mode::Run { files } if files.len() == 2
+        ));
     }
 
     #[test]

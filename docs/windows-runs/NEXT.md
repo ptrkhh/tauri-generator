@@ -1,13 +1,14 @@
-# Next Windows run: the rest of D1-D4's hands-on checks
+# Next Windows run: E's Open with and double-click checks, and the rest of D1-D4's
 
 Branch `main`. Plans:
 
 - `docs/superpowers/plans/2026-11-20-file-bridge-runtime-plumbing.md` (D1, merged);
 - `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md` (D2, merged);
 - `docs/superpowers/plans/2026-11-20-photopea-adapter.md` (D3, merged);
-- `docs/superpowers/plans/2026-11-21-generic-sites.md` (D4, merged).
+- `docs/superpowers/plans/2026-11-21-generic-sites.md` (D4, merged);
+- `docs/superpowers/plans/2026-11-24-association-registration.md` (E, merged).
 
-CI already drove all four end to end on x64 and ARM64, including live vscode.dev, live Photopea with a 150 MB PSD, and live Excalidraw. The 2026-11-21 run (`2026-11-21-results.md`) passed A-E, G-I and K, which are not repeated. This run redoes F with the right link, retests J after its fix, and does L-S for the first time. It checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
+CI already drove all four end to end on x64 and ARM64, including live vscode.dev, live Photopea with a 150 MB PSD, and live Excalidraw. The 2026-11-21 run (`2026-11-21-results.md`) passed A-E, G-I and K, which are not repeated. This run does E's checks T-V first, then redoes F with the right link, retests J after its fix, and does L-S for the first time. CI already checked E's registry writes and the command they store; T-V check what only Explorer and a person can. It checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
 
 ## 1. Get the apps
 
@@ -20,11 +21,29 @@ CI already drove all four end to end on x64 and ARM64, including live vscode.dev
    - If `gh` is missing or not logged in, give me the run `url` and ask me to download and extract it there.
 3. Let `<arch>` be `arm64` or `x64` to match. The folder must contain `excalidraw-<arch>.exe`, `photopea-<arch>.exe`, `twitter-<arch>.exe`, and `vscode-<arch>.exe`.
 4. Copy `docs\windows-runs\fixtures\photopea-red.png` from the repo into the work folder as `red.png`.
-5. Make the folder `%USERPROFILE%\Documents\webwrap-run-<timestamp>`, which the vscode.dev checks use. It must not be under `%TEMP%`: vscode.dev cannot use files in folders Windows keeps for apps. Create `note-three.md` there, as UTF-8 without BOM, containing `third` and CRLF.
+5. Make the folder `%USERPROFILE%\Documents\webwrap-run-<timestamp>`, which the vscode.dev checks use. It must not be under `%TEMP%`: vscode.dev cannot use files in folders Windows keeps for apps. Create `note-three.md` there, as UTF-8 without BOM, containing `third` and CRLF, and `double.md` the same way containing `double`. Also put a PSD there as `double.psd`: a copy of your own, or, if you have none, one made in Photopea at photopea.com in a browser (File > New, then File > Save as PSD) and moved there from Downloads.
 
 ## 2. Checks
 
 Close every Excalidraw, Photopea, Twitter, and VS Code app window before starting.
+
+**E: Open with and double-click.** Do these first: the Photopea and VS Code apps offer to register on their first launch. In PowerShell, `& <exe> --inspect-self | ConvertFrom-Json` waits for and reads the app's report.
+
+- **T. The first-launch offer.**
+  1. Launch `photopea-<arch>.exe`. Expected: before the window, a box asking to add Photopea to "Open with" for .psd files, saying it only affects my account and changes no default app. Ask me to read it out word for word, then answer **No**. Expected: Photopea opens.
+  2. Close it and launch it again. Expected: no box. Check that `%LOCALAPPDATA%\WebWrap\873756fbe97a1384\assoc-declined` exists.
+  3. Close it, delete that file, and launch it again. Expected: the box again. Ask me to answer **Yes**. Then check `(& <exe> --inspect-self | ConvertFrom-Json).associations.registeredHere` is `True`.
+  4. Close it. Launch `vscode-<arch>.exe`. Expected: the same box for .md files. Ask me to answer **Yes**, and check `registeredHere` the same way. Close it.
+- **U. Open with lists the apps.** Ask me to right-click `double.psd` in Explorer and open **Open with** (on Windows 11, also **Choose another app** if it is not listed directly). Expected: **Photopea**, with its red icon. The same for `double.md`: **VS Code**. Record where each appeared.
+- **V. Double-click opens the file, once Windows has been told to.** E never sets a default; I do, through Windows.
+  1. Ask me to double-click `double.psd`. Expected: Windows' own "How do you want to open this file?" (or the current default app). Ask me to pick **Photopea** with **Always** (if the default app opened instead, use Open with > Choose another app > Photopea > Always). Expected: the Photopea app opens `double.psd`.
+  2. Ask me to make a small change and press Ctrl+S. Expected: `double.psd`'s modified time changes. Close the app.
+  3. Ask me to double-click `double.psd` again. Expected: the Photopea app opens it directly, with no prompt.
+  4. For `double.md`, ask me to use Open with > Choose another app > **VS Code** > Always. Expected: the VS Code app opens it showing `double`. Ask me to change it to `doubled` and press Ctrl+S, allowing any prompt. Check with `Get-Content -Raw`: `doubled` plus CRLF. Close it, double-click `double.md`, and expect it to open directly.
+  5. Moving the app re-offers. Copy `photopea-<arch>.exe` into a new folder `<work folder>\moved` and launch the copy. Expected: the offer box again (the registration points at the original). Ask me to answer **No**, then close it.
+  6. Clean up: run `& <exe> --unregister-associations | Out-String` on the original `photopea-<arch>.exe` and `vscode-<arch>.exe`, and record the output. Then ask me to reset the .psd and .md defaults in Settings > Apps > Default apps if I want my previous ones back.
+
+Close every app before the D1 checks.
 
 **D1: window behaviour**
 
@@ -104,6 +123,9 @@ Close every app afterwards. Delete the Documents folder from step 5.
 ## 3. Extra results to record
 
 - The CI run id and URL you used.
+- For T, the offer box's text, word for word.
+- For U, where each app appeared in Open with.
+- For V, the prompt Windows showed on the first double-click, and the unregister output.
 - For J, which dialog Ctrl+O opened, and any permission prompt.
 - For L, the file's size and the seconds until it opened.
 - For M and N, whether the keyboard shortcuts worked or the menu was needed.

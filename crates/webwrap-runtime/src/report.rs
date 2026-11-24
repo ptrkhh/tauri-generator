@@ -3,28 +3,34 @@ use std::io::Write;
 
 use windows::core::HSTRING;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE,
+    MessageBoxW, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
+    MESSAGEBOX_RESULT, MESSAGEBOX_STYLE,
 };
 
-fn message_box(message: &str, icon: MESSAGEBOX_STYLE) {
+fn message_box(message: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
     unsafe {
         MessageBoxW(
             None,
             &HSTRING::from(message),
             &HSTRING::from("WebWrap"),
-            MB_OK | icon,
-        );
+            style,
+        )
     }
+}
+
+/// Ask a yes/no question and wait for the answer.
+pub fn ask(question: &str) -> bool {
+    message_box(question, MB_YESNO | MB_ICONQUESTION) == IDYES
 }
 
 /// Show an error and wait for the user to dismiss it.
 pub fn error_box(message: &str) {
-    message_box(message, MB_ICONERROR);
+    message_box(message, MB_OK | MB_ICONERROR);
 }
 
 /// Show a notice without blocking the caller.
 pub fn info_box_async(message: String) {
-    std::thread::spawn(move || message_box(&message, MB_ICONINFORMATION));
+    std::thread::spawn(move || message_box(&message, MB_OK | MB_ICONINFORMATION));
 }
 
 /// Show an error without blocking the caller, so the window keeps working.

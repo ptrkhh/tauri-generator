@@ -16,7 +16,16 @@ export function required(name) {
 }
 
 const children = [];
+/** Decline the first-launch association offer (E) before an app starts: its
+ * box would hold the window back. The offer itself is a PC check. */
+function declineOffer(exe) {
+  const { webview2DataDir } = JSON.parse(execFileSync(exe, ['--inspect-self'], { encoding: 'utf8' }));
+  fs.mkdirSync(webview2DataDir, { recursive: true });
+  fs.writeFileSync(path.join(webview2DataDir, 'assoc-declined'), '');
+}
+
 export function launch(exe, debugPort, args = []) {
+  declineOffer(exe);
   const child = spawn(exe, args, {
     env: {
       ...process.env,

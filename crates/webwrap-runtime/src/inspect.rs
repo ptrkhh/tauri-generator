@@ -26,6 +26,12 @@ pub fn run(spec: &AppSpec, data_dir: &Path, check_urls: &[String]) -> ! {
             })
         })
         .collect();
+    let registration = crate::assoc::Registration::new(
+        &spec.app_id,
+        &spec.display_name,
+        &spec.file_associations,
+        crate::assoc::this_exe().unwrap_or_default(),
+    );
     let report = json!({
         "schemaVersion": spec.schema_version,
         "appId": spec.app_id,
@@ -40,6 +46,11 @@ pub fn run(spec: &AppSpec, data_dir: &Path, check_urls: &[String]) -> ! {
             Adapter::Photopea | Adapter::VscodeDev => "verified",
         },
         "fileAssociations": spec.file_associations,
+        "associations": {
+            "progId": registration.prog_id,
+            "extensions": registration.extensions,
+            "registeredHere": registration.registered_here(),
+        },
         "dnsMode": spec.dns_mode,
         "appVersion": spec.app_version,
         "runtimeArch": std::env::consts::ARCH,
