@@ -288,4 +288,50 @@ run(async () => {
     await shell.evaluate(`location.href = ${JSON.stringify(SHELL)}`);
     await until(() => state?.docs.some((doc) => doc.name === 'while-away' && doc.source.startsWith('webwrap:')), 'while-away.psd after returning', 60000);
   }, explain);
+
+  await check('E: Open with registration for .psd, its command opens a file, and other apps\' entries survive', async () => {
+    const reg = (...args) => execFileSync('reg', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    /** A REG_SZ value, or null if it or its key is missing. */
+    const value = (key, ...which) => {
+      try {
+        return /\sREG_SZ(?: {4}(.*))?$/m.exec(reg('query', key, ...which))?.[1]?.trimEnd() ?? '';
+      } catch {
+        return null;
+      }
+    };
+    const inspect = () => JSON.parse(execFileSync(APP_D, ['--inspect-self'], { encoding: 'utf8' })).associations;
+    const classes = 'HKCU\\Software\\Classes';
+    const list = `${classes}\\.psd\\OpenWithProgids`;
+    const fileExts = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.psd';
+    // Another app's Open with entry, and a default the user chose in Windows.
+    reg('add', list, '/v', 'Other.App', '/t', 'REG_SZ', '/d', '', '/f');
+    reg('add', `${fileExts}\\UserChoice`, '/v', 'ProgId', '/t', 'REG_SZ', '/d', 'Other.App', '/f');
+    try {
+      const { progId, extensions } = inspect();
+      assert(JSON.stringify(extensions) === '[".psd"]', `extensions: ${extensions}`);
+      assert(inspect().registeredHere === false, 'registered before --register-associations');
+
+      execFileSync(APP_D, ['--register-associations']);
+      assert(inspect().registeredHere === true, 'not registered after --register-associations');
+      const command = value(`${classes}\\${progId}\\shell\\open\\command`, '/ve');
+      assert(command?.toLowerCase() === `"${APP_D}" "%1"`.toLowerCase(), `command: ${command}`);
+      assert(value(list, '/v', progId) === '', `${progId} is not in .psd's Open with list`);
+      // What Explorer runs for Open with or a double-click: the stored command
+      // with %1 replaced by the file. Here the app is running, so it forwards.
+      const exe = /^"([^"]+)" "%1"$/.exec(command)[1];
+      const file = makeFile('double-clicked.psd', makePsd(8, 8));
+      await forward(exe, DEBUG_D, file);
+      await logged(d, /delivered double-clicked\.psd/, 'the delivery in the log');
+
+      execFileSync(APP_D, ['--unregister-associations']);
+      assert(inspect().registeredHere === false, 'still registered after --unregister-associations');
+      assert(value(`${classes}\\${progId}\\shell\\open\\command`, '/ve') === null, 'the ProgID is left behind');
+      assert(value(list, '/v', progId) === null, `${progId} is left in .psd's Open with list`);
+      assert(value(list, '/v', 'Other.App') === '', 'another app\'s Open with entry was removed');
+      assert(value(`${fileExts}\\UserChoice`, '/v', 'ProgId') === 'Other.App', 'the user\'s default app changed');
+    } finally {
+      reg('delete', list, '/v', 'Other.App', '/f');
+      reg('delete', fileExts, '/f');
+    }
+  }, explain);
 });

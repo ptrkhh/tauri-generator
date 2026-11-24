@@ -1,6 +1,6 @@
 # Association Registration Design (sub-project E)
 
-Date: 2026-11-22. Status: approved by the user 2026-11-24. Plan: not yet written.
+Date: 2026-11-22. Status: approved by the user 2026-11-24. Plan: [`2026-11-24-association-registration.md`](../plans/2026-11-24-association-registration.md).
 
 ## Summary
 
@@ -59,7 +59,7 @@ The name shown in **Open with** comes from the exe's `FileDescription`, which pa
 ### E1: registration (`assoc.rs`)
 
 - `register(spec, exe_path)`: write the tree above, idempotently (values are plain sets, rewriting is fine). On a registry error, return one line naming the key; the caller boxes it but never blocks launch.
-- `registered_here(spec, exe_path)`: one `RegGetValueW` of the command string, ordinal case-insensitive comparison. Runs at every launch before the window; the cost is one open of a local key.
+- `registered_here(spec, exe_path)`: one `RegGetValueW` of the command string, ordinal case-insensitive comparison, plus one per extension for this ProgID's `OpenWithProgids` value, so an app regenerated with a new extension offers again. Runs at every launch before the window; the cost is one open of a local key.
 - `unregister(spec)`: remove exactly the app's own tree and its own-named `OpenWithProgids` values. Uses `RegDeleteTreeW` for the ProgID; `RegDeleteKeyValueW` per extension.
 - CLI: in `parse_args`, `--register-associations` and `--unregister-associations` join `--inspect-self` as first-argument-only modes. They load the embedded spec, act, print one line to stdout, and exit. A run with no associations reports that and exits 0.
 - Both register and unregister end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
