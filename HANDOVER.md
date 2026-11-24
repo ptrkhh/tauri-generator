@@ -1,6 +1,6 @@
 # WebWrap handover
 
-Updated 2026-11-21. The spikes and sub-projects A-D are finished; E is next. A fresh Codex/Claude session should start here:
+Updated 2026-11-24. The spikes and sub-projects A-D are finished; E is next. A fresh Codex/Claude session should start here:
 
 - Work on `main` in the repository root. The `spike/photopea-windows-writeback` branch and its `.worktrees/photopea-windows-writeback` linked worktree were merged and removed; do not look for them.
 - Current code HEAD: check `git log -1 --format=%H` rather than trusting a hash recorded here, which goes stale as soon as the next commit lands.
@@ -121,6 +121,7 @@ Plan: [`docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md`](docs/superpowe
 - **WebView2 refuses a site's handle** inside `%LOCALAPPDATA%` (including `%TEMP%`), `%APPDATA%`, and `%ProgramData%`, on network shares, and for paths of 260 characters or more. This was measured in CI, so the runtime refuses those files up front with a message.
   - **Test files for handles must live outside AppData.** `e2e/apps.mjs` exports `outside` for that.
   - A save through a handle does not keep the creation time.
+- **Ctrl+O.** vscode.dev binds Ctrl+O to Open Folder too, and Open Folder wins, so the script catches a real Ctrl+O before vscode.dev and runs Open File through the palette instead; the keystroke's user activation lets WebView2's picker open (checked on live vscode.dev in Chromium, 2026-11-24).
 - **Tests.**
   - `e2e/bridge.mjs` adds a local stand-in for vscode.dev, `bridge-c`.
   - `e2e/vscode-live.mjs` drives live vscode.dev in its own CI step, which also runs weekly (`schedule`).
@@ -178,7 +179,7 @@ E is not specced. Start by brainstorming its spec with the user, from the base d
 
 Also open:
 
-- the hands-on PC run queued in `docs/windows-runs/NEXT.md` (D1-D4), not yet run.
+- the rest of the hands-on PC run in `docs/windows-runs/NEXT.md`. The 2026-11-21 run (`docs/windows-runs/2026-11-21-results.md`) passed A-E, G-I and K. Its two failures are resolved: F clicked an inline same-window link, which correctly stays in the app, so the check now names the footer link; J showed that vscode.dev binds Ctrl+O to Open Folder as well as Open File, so `vscode.js` now runs Open File for a real Ctrl+O, and `e2e/vscode-live.mjs` opens a file through the dialog in CI. F, J and L-S remain.
 
 ## How work runs now (since 2026-11-19)
 
