@@ -1,4 +1,4 @@
-# Next Windows run: D1 file plumbing, D2 vscode.dev, D3 Photopea, D4 generic sites, hands-on checks
+# Next Windows run: the rest of D1-D4's hands-on checks
 
 Branch `main`. Plans:
 
@@ -7,7 +7,7 @@ Branch `main`. Plans:
 - `docs/superpowers/plans/2026-11-20-photopea-adapter.md` (D3, merged);
 - `docs/superpowers/plans/2026-11-21-generic-sites.md` (D4, merged).
 
-CI already drove all four end to end on x64 and ARM64, including live vscode.dev, live Photopea with a 150 MB PSD, and live Excalidraw. This run checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
+CI already drove all four end to end on x64 and ARM64, including live vscode.dev, live Photopea with a 150 MB PSD, and live Excalidraw. The 2026-11-21 run (`2026-11-21-results.md`) passed A-E, G-I and K, which are not repeated. This run redoes F with the right link, retests J after its fix, and does L-S for the first time. It checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
 
 ## 1. Get the apps
 
@@ -20,10 +20,7 @@ CI already drove all four end to end on x64 and ARM64, including live vscode.dev
    - If `gh` is missing or not logged in, give me the run `url` and ask me to download and extract it there.
 3. Let `<arch>` be `arm64` or `x64` to match. The folder must contain `excalidraw-<arch>.exe`, `photopea-<arch>.exe`, `twitter-<arch>.exe`, and `vscode-<arch>.exe`.
 4. Copy `docs\windows-runs\fixtures\photopea-red.png` from the repo into the work folder as `red.png`.
-5. Make the folder `%USERPROFILE%\Documents\webwrap-run-<timestamp>`, which the vscode.dev checks use. It must not be under `%TEMP%`, for the reason given in check K. Create these files there, as UTF-8 without BOM, each ending in CRLF:
-   - `note-one.md` containing `first`;
-   - `note-two.md` containing `second`;
-   - `note-three.md` containing `third`.
+5. Make the folder `%USERPROFILE%\Documents\webwrap-run-<timestamp>`, which the vscode.dev checks use. It must not be under `%TEMP%`: vscode.dev cannot use files in folders Windows keeps for apps. Create `note-three.md` there, as UTF-8 without BOM, containing `third` and CRLF.
 
 ## 2. Checks
 
@@ -31,59 +28,20 @@ Close every Excalidraw, Photopea, Twitter, and VS Code app window before startin
 
 **D1: window behaviour**
 
-- **A. A second launch brings the running window to the front.**
-  1. Launch `photopea-<arch>.exe` and wait for Photopea to load.
-  2. Open File Explorer on the apps folder so Explorer covers Photopea.
-  3. Ask me to double-click `photopea-<arch>.exe` in Explorer.
-  4. Ask me to confirm:
-     - the existing Photopea window comes to the front;
-     - no second Photopea window opens;
-     - no message box appears.
-  5. Also record `(Get-Process | Where-Object MainWindowTitle -eq 'Photopea').Count`. Expected: `1`.
-- **B. Also when minimized.** Ask me to minimize Photopea, then double-click `photopea-<arch>.exe` again. Expected: Photopea is restored and in front, and there is still one window.
-- **C. Dropping a file on the exe.** Ask me to drag `red.png` from Explorer onto `photopea-<arch>.exe`.
-  - Expected: Photopea comes to the front, with no new window and no message box.
-  - The image opens in Photopea as a new document named `red`.
-- **D. Dropping a file on the window.** Ask me to drag `red.png` from Explorer onto the open Photopea window. Expected: Photopea opens the image as a new document, as it would in a browser.
-- **E. A missing file is reported.**
-  1. With Photopea still running, run `Start-Process <folder>\apps\photopea-<arch>.exe -ArgumentList 'C:\nope\missing.psd' -PassThru -Wait`.
-  2. Ask me to read out the message box text word for word, then dismiss it.
-  3. Record the exit code. Expected: `0`, because the running window was still brought forward.
-- **F. Pop-ups still go to the browser.** Launch `twitter-<arch>.exe`. Ask me to click a link on the page that opens in a new tab on the web, such as Terms of Service. Expected: it opens in my default browser, and no new app window appears.
+- **F. Pop-ups still go to the browser.** Launch `twitter-<arch>.exe`. Ask me to click **Terms** in the page's footer, which opens in a new tab on the web. Expected: it opens in my default browser, and no new app window appears.
+  - Not the inline "Terms of Service" link above it: that one has no `target`, so it navigates the app's own window, as it would a browser tab (checked in Chromium on 2026-11-24). That is what the 2026-11-21 run clicked.
 
 Close every app before the vscode.dev checks.
 
 **D2: vscode.dev**
 
-- **G. Opening a file by dropping it on the exe.**
-  1. Ask me to drag `note-one.md` from Explorer onto `vscode-<arch>.exe`, with no VS Code app running.
-  2. Ask me to confirm:
-     - the app opens vscode.dev;
-     - within about 30 s, `note-one.md` opens in a tab by itself, showing `first`;
-     - nothing was typed anywhere, and no message box appeared.
-  3. Record how many seconds it took.
-- **H. Ctrl+S saves the original.**
-  1. Ask me to click into the editor, change `first` to `edited`, and press Ctrl+S.
-  2. Check the file with `Get-Content -Raw <docs folder>\note-one.md`. Expected: `edited` plus CRLF.
-  3. Also check that `%USERPROFILE%\Downloads\note-one.md` does not exist.
-- **I. Two more files from one launch open as new tabs.**
-  1. Ask me to select `note-two.md` and `note-three.md` together in Explorer and drag both onto `vscode-<arch>.exe`.
-  2. Expected:
-     - the running window comes to the front;
-     - two new tabs open, one after the other, with the right text;
-     - no second window appears.
-- **J. Ctrl+O uses the Windows Open dialog, and saves back.**
-  1. Ask me to press Ctrl+O inside the app. Expected: a Windows Open dialog appears.
-     - If Ctrl+O does nothing, ask me to use vscode.dev's menu instead (the ☰ button, then File > Open File...), and record that Ctrl+O did nothing.
-  2. Ask me to pick `note-three.md` again in the dialog. Expected: it opens, or vscode.dev switches to its tab.
-  3. Ask me to change the text to `picked`, then press Ctrl+S.
-  4. Check with `Get-Content -Raw`. Expected: `picked` plus CRLF.
-  5. Ask me whether any permission prompt appeared, and record its text.
-- **K. A file in `%TEMP%` is refused with a message.**
-  1. Copy `note-one.md` into the `%TEMP%` work folder as `in-temp.md`.
-  2. Run `Start-Process <folder>\apps\vscode-<arch>.exe -ArgumentList '<work folder>\in-temp.md'`.
-  3. Ask me to read out the message box text word for word, then dismiss it. Expected: it names the file and says vscode.dev cannot use files in folders Windows keeps for apps.
-  4. Expected: the file does not open in vscode.dev.
+- **J. Ctrl+O uses the Windows Open dialog, and saves back.** On 2026-11-21 Ctrl+O opened vscode.dev's folder picker, because vscode.dev binds Ctrl+O to Open Folder as well as Open File. The adapter now runs Open File for Ctrl+O.
+  1. Launch `vscode-<arch>.exe` and wait for vscode.dev to load.
+  2. Ask me to press Ctrl+O. Expected: a Windows Open dialog for a **file**, not "Select a folder this site can view".
+  3. Ask me to pick `note-three.md`. Expected: it opens in a tab showing `third`.
+  4. Ask me to change the text to `picked`, then press Ctrl+S, and allow any permission prompt.
+  5. Check with `Get-Content -Raw`. Expected: `picked` plus CRLF, and no `%USERPROFILE%\Downloads\note-three.md`.
+  6. Record any permission prompt word for word.
 
 Close every app before the Photopea checks.
 
@@ -146,8 +104,7 @@ Close every app afterwards. Delete the Documents folder from step 5.
 ## 3. Extra results to record
 
 - The CI run id and URL you used.
-- For G, the seconds until the file opened.
-- For J, whether Ctrl+O itself opened the dialog, and any permission prompt.
+- For J, which dialog Ctrl+O opened, and any permission prompt.
 - For L, the file's size and the seconds until it opened.
 - For M and N, whether the keyboard shortcuts worked or the menu was needed.
 - For Q and R, any permission prompt, word for word.
