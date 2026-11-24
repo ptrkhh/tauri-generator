@@ -1,6 +1,6 @@
 # WebWrap handover
 
-Updated 2026-11-24. The spikes and sub-projects A-D are finished; E is next. A fresh Codex/Claude session should start here:
+Updated 2026-11-24. The spikes and sub-projects A-D are finished; E is implemented and awaits its PC checks; F is next. A fresh Codex/Claude session should start here:
 
 - Work on `main` in the repository root. The `spike/photopea-windows-writeback` branch and its `.worktrees/photopea-windows-writeback` linked worktree were merged and removed; do not look for them.
 - Current code HEAD: check `git log -1 --format=%H` rather than trusting a hash recorded here, which goes stale as soon as the next commit lands.
@@ -58,7 +58,7 @@ The follow-on work was brainstormed on 2026-09-16. The Windows track is split in
 | B | Minimal wrapper runtime | resource self-read, data-dir isolation, nav policy, launch | 11, 14 | **done**, reviewed, 12 tests, Windows-verified |
 | C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (Windows half), 3 | **done**, reviewed, Windows-verified in CI |
 | D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **done**: D1 (6, 7, 8), D2 (save half of 5), D3 (save half of 4), D4 (generic sites), each reviewed and verified in CI, live sites included |
-| E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | not specced |
+| E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | **implemented**, verified in CI (registry round trip, stored command); gates close on the PC checks T-V |
 | F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
 
 ### Sub-project B, done 2026-11-20
@@ -168,18 +168,35 @@ Plan: [`docs/superpowers/plans/2026-11-21-generic-sites.md`](docs/superpowers/pl
 - **Tests.** `e2e/generic.mjs` (app `bridge-e`, one page per tier) and `e2e/generic-live.mjs` (live Excalidraw, weekly: tier 1 open and Ctrl+S save both pass). `pickInDialog` moved to `e2e/apps.mjs` and finds WebView2's own picker too.
 - **Known limits** (evidence section 6): tier 2 writing is a PC check, because a write through a picker handle gets no answer on the runners; hidden upload boxes are not filled.
 
-## Immediate next step: E, association registration
+### Sub-project E, implemented 2026-11-24
 
-E is not specced. Start by brainstorming its spec with the user, from the base design and the D spec's "Open items for later sub-projects":
+Spec: [`docs/superpowers/specs/2026-11-22-association-registration-design.md`](docs/superpowers/specs/2026-11-22-association-registration-design.md). Plan: [`docs/superpowers/plans/2026-11-24-association-registration.md`](docs/superpowers/plans/2026-11-24-association-registration.md). Branch `feat/association-registration`.
 
-- HKCU registration and "Open with", so double-clicking a `.psd` or `.md` launches the matching app (the double-click halves of gates 4 and 5);
-- `"%1"` per file or a multi-file form (D1 accepts up to 16 files either way);
-- whether registering one architecture build covers both;
-- the first-launch offer.
+- **`crates/webwrap-runtime/src/assoc.rs`** registers ProgID `webwrap.<app-id>` under `HKCU\Software\Classes`, plus this ProgID's value in each extension's `Classes\.<ext>\OpenWithProgids`. The command is `"<exe>" "%1"`.
+  - It never writes `UserChoice` or anything under Explorer's `FileExts`. Double-click opens the app only after the user picks it with **Always** in Windows' own prompt.
+  - It calls `SHChangeNotify(SHCNE_ASSOCCHANGED)` after every change.
+- **"Registered here"** means the command matches this exe's path (ignoring case) and every extension lists the ProgID. So a moved exe, or one regenerated with a new extension, offers again.
+- **The offer** is a Yes/No box shown after `single_instance::serve` starts and before the window. No creates `<data_dir>\assoc-declined`, and the app never asks again.
+  - **Tests must pre-decline it:** `e2e/apps.mjs` `launch` and the workflow's smoke launch both do. Otherwise its box holds back the window of any app that has associations.
+- **Hidden flags:** `--register-associations` and `--unregister-associations`. `--inspect-self` reports `associations.registeredHere`.
+- **CI** (`e2e/photopea.mjs`, Bridge D, `.psd`) does a registry round trip with a foreign `OpenWithProgids` value and a `UserChoice` seeded. It also runs the stored command with a file and sees the file delivered.
+- **Gates 4 and 5** close only on the PC checks T-V.
+
+## Immediate next step: F, generator UI
+
+F is not specced. Brainstorm its spec with the user, from the base design and E's spec's "Open items for later sub-projects":
+
+- the Tauri shell;
+- the icon discovery chain and gallery;
+- the association editor, including manifest `file_handlers` and presets;
+- whether to surface the register flags.
 
 Also open:
 
-- the rest of the hands-on PC run in `docs/windows-runs/NEXT.md`. The 2026-11-21 run (`docs/windows-runs/2026-11-21-results.md`) passed A-E, G-I and K. Its two failures are resolved: F clicked an inline same-window link, which correctly stays in the app, so the check now names the footer link; J showed that vscode.dev binds Ctrl+O to Open Folder as well as Open File, so `vscode.js` now runs Open File for a real Ctrl+O, and `e2e/vscode-live.mjs` opens a file through the dialog in CI. F, J and L-S remain.
+- **The hands-on PC run queued in `docs/windows-runs/NEXT.md`:** E's T-V, then F, J and L-S of D1-D4.
+  - The 2026-11-21 run (`docs/windows-runs/2026-11-21-results.md`) passed A-E, G-I and K.
+  - Its F failure was the check, not the app: the inline link it clicked has no `target`, so it rightly stays in the app. The check now names the footer link.
+  - Its J failure was real: vscode.dev binds Ctrl+O to Open Folder as well as Open File. `vscode.js` now runs Open File for a real Ctrl+O, and `e2e/vscode-live.mjs` opens a file through the dialog in CI.
 
 ## How work runs now (since 2026-11-19)
 
@@ -204,6 +221,6 @@ The user's Windows PC is a slow ARM64 laptop (Snapdragon X Plus), so it never co
 
 Read the full plan before editing. Continue the subagent-driven workflow with one implementer and a review checkpoint per task. Preserve the no-sidecar and failure-preservation invariants. Do not claim the product is complete from these spikes; they are packaging and file-write proofs, not the final generator.
 
-Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. D2 closed the save half of gate 5, and D3 the save half of gate 4. D4 closes no gate. The "Open with" and double-click halves of gates 4 and 5 belong to E and must not be described as proven before then. Gate 1 also needs F and the phase-2 APK.
+Sub-project A closes no release gate. B closed gates 11 and 14. C closed the Windows half of gate 1 (reworded to two files per app) and gate 3. D1 closed gates 6, 7, and 8. D2 closed the save half of gate 5, and D3 the save half of gate 4. D4 closes no gate. The "Open with" and double-click halves of gates 4 and 5 belong to E. E is implemented and CI-verified, but these halves must not be described as proven until the PC checks T-V pass. Gate 1 also needs F and the phase-2 APK.
 
 One lesson from A's review worth carrying into B: every defect it found was a claim asserted in prose that no test asserted — a library behaviour taken on trust. The identity vectors and the documented `url`-crate behaviour, both of which *were* pinned by tests, held up under independent recomputation. When the plan states what a dependency does, make it an `assert`, not a note.
