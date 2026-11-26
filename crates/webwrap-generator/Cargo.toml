@@ -1,0 +1,28 @@
+[package]
+name = "webwrap-generator"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "tauri_generator"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+tauri = "=2.11.5"
+webwrap-discover = { path = "../webwrap-discover" }
+webwrap-pack = { path = "../webwrap-pack" }
+webwrap-spec = { path = "../webwrap-spec" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }

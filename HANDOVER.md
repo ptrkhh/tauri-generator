@@ -1,6 +1,6 @@
 # WebWrap handover
 
-Updated 2026-11-24. The spikes and sub-projects A-D are finished; E is implemented and awaits its PC checks; F is next. A fresh Codex/Claude session should start here:
+Updated 2026-11-24. The spikes and sub-projects A-D are finished; E and F are implemented and await their PC checks (T-V, W-Y); phase 2 is next. A fresh Codex/Claude session should start here:
 
 - Work on `main` in the repository root. The `spike/photopea-windows-writeback` branch and its `.worktrees/photopea-windows-writeback` linked worktree were merged and removed; do not look for them.
 - Current code HEAD: check `git log -1 --format=%H` rather than trusting a hash recorded here, which goes stale as soon as the next commit lands.
@@ -59,7 +59,7 @@ The follow-on work was brainstormed on 2026-09-16. The Windows track is split in
 | C | Generator packaging core | port `pe.rs`, embed template, specialize, atomic publish | 1 (Windows half), 3 | **done**, reviewed, Windows-verified in CI |
 | D | File bridge and adapters | D1 runtime plumbing; D2 `vscode.dev`; D3 Photopea; D4 generic sites | 6, 7, 8, save half of 4 and 5 | **done**: D1 (6, 7, 8), D2 (save half of 5), D3 (save half of 4), D4 (generic sites), each reviewed and verified in CI, live sites included |
 | E | Association registration | HKCU registration, "Open with", first-launch offer | double-click half of 4 and 5 | **implemented**, verified in CI (registry round trip, stored command); gates close on the PC checks T-V |
-| F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | not specced |
+| F | Generator UI and discovery | Tauri shell, discovery chain and gallery, association editor | 1 | **implemented**, verified in CI on both architectures; PC checks W-Y queued |
 
 ### Sub-project B, done 2026-11-20
 
@@ -182,21 +182,44 @@ Spec: [`docs/superpowers/specs/2026-11-22-association-registration-design.md`](d
 - **CI** (`e2e/photopea.mjs`, Bridge D, `.psd`) does a registry round trip with a foreign `OpenWithProgids` value and a `UserChoice` seeded. It also runs the stored command with a file and sees the file delivered.
 - **Gates 4 and 5** close only on the PC checks T-V.
 
-## Immediate next step: F, generator UI
+### Sub-project F, implemented 2026-11-26
 
-F is not specced. Brainstorm its spec with the user, from the base design and E's spec's "Open items for later sub-projects":
+Spec: [`docs/superpowers/specs/2026-11-25-generator-ui-design.md`](docs/superpowers/specs/2026-11-25-generator-ui-design.md). Plan: [`docs/superpowers/plans/2026-11-26-generator-ui.md`](docs/superpowers/plans/2026-11-26-generator-ui.md). Branches `feat/generator-discovery` (F1) and `feat/generator-app` (F2-F4).
 
-- the Tauri shell;
-- the icon discovery chain and gallery;
-- the association editor, including manifest `file_handlers` and presets;
-- whether to surface the register flags.
+- **`crates/webwrap-discover`** (plain Rust, tested on Linux and natively in CI) finds:
+  - the URL to wrap, following permanent redirects only;
+  - the name, and up to 12 icons;
+  - the manifest's `file_handlers`, plus the presets.
 
-Also open:
+  Every request goes through one `fetch` that carries all the limits. It verifies against the Windows store. vscode.dev's manifest is linked only by script, so it is found through an adapter hint.
+  - **Under Wine,** the tests that use a test root fail: the verifier's `hExclusiveRoot` is unsupported there. Native CI is the judge.
+- **`crates/webwrap-generator`** builds `tauri_generator.exe`, shipped in `acceptance-<triple>` as `tauri_generator-<arch>.exe`. It has four commands:
+  - `discover` and `generate`, on `spawn_blocking`;
+  - `pick_folder`, a sync command, so it runs on the main thread, opening at the last folder used;
+  - `show_in_folder`.
 
-- **The hands-on PC run queued in `docs/windows-runs/NEXT.md`:** E's T-V, then F, J and L-S of D1-D4.
-  - The 2026-11-21 run (`docs/windows-runs/2026-11-21-results.md`) passed A-E, G-I and K.
-  - Its F failure was the check, not the app: the inline link it clicked has no `target`, so it rightly stays in the app. The check now names the footer link.
-  - Its J failure was real: vscode.dev binds Ctrl+O to Open Folder as well as Open File. `vscode.js` now runs Open File for a real Ctrl+O, and `e2e/vscode-live.mjs` opens a file through the dialog in CI.
+  The window stays on `https://tauri.localhost` and refuses new windows.
+- **The page** (`ui/`, plain JavaScript with `// @ts-check`, checked by `tsc` in CI) decodes icons in WebView2 to 256x256 PNGs and draws the initials icon. Every site-supplied string goes in as text.
+- **Tests:**
+  - `e2e/generator-page.mjs`: headless Chrome or Edge, with the commands stubbed;
+  - `e2e/generator.mjs`: the real generator, a local site trusted in `LocalMachine\Root`, the real folder picker, then inspecting the outputs and regenerating.
+- **For future dialog automation:** `pickInDialog` drives the folder picker's "Folder:" box, which is control **1152**, a plain `Edit`, not 1148.
+- **Gate 1:** F completes its Windows side for a person. Gate 1 as a whole still needs the phase-2 APK.
+
+## Immediate next step: the PC run, then phase 2
+
+**The hands-on PC run queued in `docs/windows-runs/NEXT.md`:**
+
+- E's T-V, F's W-Y, then F, J and L-S of D1-D4.
+- The 2026-11-21 run (`docs/windows-runs/2026-11-21-results.md`) passed A-E, G-I and K.
+- Its F failure was the check, not the app: the inline link it clicked has no `target`, so it rightly stays in the app.
+- Its J failure was real and is fixed: vscode.dev binds Ctrl+O to Open Folder as well, so `vscode.js` now runs Open File, and `e2e/vscode-live.mjs` checks it in CI.
+
+**Phase 2**, each needing its own spec with the user:
+
+- Android APK generation: gates 1 (APK half), 2, 9 and 10;
+- custom DNS over HTTPS: gates 12 and 13, and the generator's DNS field;
+- code signing.
 
 ## How work runs now (since 2026-11-19)
 

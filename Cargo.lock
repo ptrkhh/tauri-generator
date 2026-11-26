@@ -4429,6 +4429,7 @@ dependencies = [
  "dom_query",
  "reqwest",
  "rustls",
+ "serde",
  "serde_json",
  "url",
  "webwrap-pack",
@@ -4443,6 +4444,19 @@ dependencies = [
  "serde_json",
  "webwrap-pack",
  "webwrap-spec",
+]
+
+[[package]]
+name = "webwrap-generator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-build",
+ "webwrap-discover",
+ "webwrap-pack",
+ "webwrap-spec",
+ "windows",
 ]
 
 [[package]]

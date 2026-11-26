@@ -56,7 +56,7 @@ jobs:
       - run: cargo test -p webwrap-runtime --target ${{ matrix.target }}
       - name: Probe regenerating over a running app
         run: cargo test -p webwrap-pack --target ${{ matrix.target }} --test running_app -- --ignored --nocapture
-      - run: cargo clippy -p webwrap-spec -p webwrap-bridge -p webwrap-discover -p webwrap-pack -p webwrap-generate -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
+      - run: cargo clippy -p webwrap-spec -p webwrap-bridge -p webwrap-discover -p webwrap-pack -p webwrap-generate -p webwrap-generator -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: Build the generator and the acceptance apps
         shell: pwsh
         env:
@@ -81,6 +81,11 @@ jobs:
           Copy-Item $env:WEBWRAP_TEMPLATE_X64 acceptance/unspecialized-template-x64.exe
           Copy-Item $env:WEBWRAP_TEMPLATE_ARM64 acceptance/unspecialized-template-arm64.exe
           Copy-Item $gen acceptance/
+          # The generator window (F), for this runner's architecture.
+          cargo build --release -p webwrap-generator --target $env:T
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $arch = if ($env:T -like 'aarch64*') { 'arm64' } else { 'x64' }
+          Copy-Item "target/$env:T/release/tauri_generator.exe" "acceptance/tauri_generator-$arch.exe"
           Get-ChildItem acceptance | Format-Table Name, Length
       - uses: actions/upload-artifact@v4
         with:
@@ -147,6 +152,32 @@ jobs:
           node e2e/photopea.mjs
           if ($LASTEXITCODE -ne 0) { exit 1 }
           node e2e/generic.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Generator page and end-to-end (F3, F4)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          T: ${{ matrix.target }}
+        run: |
+          npx -y -p typescript@5 tsc --noEmit --allowJs --checkJs --strict --target es2022 --lib es2022,dom,dom.iterable crates/webwrap-generator/ui/app.js
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node e2e/generator-page.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $native = if ($env:T -like 'aarch64*') { 'arm64' } else { 'x64' }
+          # Discovery verifies against the Windows store, not WebView2's
+          # --ignore-certificate-errors, so the test site's certificate is trusted there.
+          $cert = New-SelfSignedCertificate -DnsName localhost -CertStoreLocation Cert:\CurrentUser\My
+          $env:WEBWRAP_E2E_PFX = Join-Path $env:RUNNER_TEMP generator.pfx
+          Export-PfxCertificate -Cert $cert -FilePath $env:WEBWRAP_E2E_PFX -CryptoAlgorithmOption AES256_SHA256 `
+            -Password (ConvertTo-SecureString webwrap -AsPlainText -Force) | Out-Null
+          $cer = Join-Path $env:RUNNER_TEMP generator.cer
+          Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          $env:WEBWRAP_E2E_GENERATOR = (Resolve-Path "acceptance/tauri_generator-$native.exe").Path
+          $env:WEBWRAP_E2E_INSPECT = (Resolve-Path "target/$env:T/release/webwrap-generate.exe").Path
+          $env:WEBWRAP_E2E_NATIVE = $native
+          node e2e/generator.mjs
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: End-to-end against live vscode.dev (D2)
         # Its own step, so a vscode.dev outage or change reads as this step

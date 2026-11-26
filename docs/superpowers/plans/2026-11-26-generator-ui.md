@@ -24,6 +24,13 @@ Spec: [`../specs/2026-11-25-generator-ui-design.md`](../specs/2026-11-25-generat
   - `vscode.dev` gives "Code" (4 icons, through the manifest hint), with only `.md` ticked.
 - **Under Wine** the local-server tests fail when building the client: E_INVALIDARG from `CertCreateCertificateChainEngine`. With extra roots, the verifier sets `hExclusiveRoot`, which Wine's `crypt32` rejects. Windows has supported it since 7, and CI runs these tests natively.
 
+## F2-F4: done 2026-11-26, branch `feat/generator-app`
+
+All three phases are as planned below, and CI passes on both architectures. Two things CI taught us:
+
+- **The folder picker's "Folder:" box is control 1152,** not the Open dialog's 1148. `pickInDialog` now takes either.
+- **`status` collides with `window.status`** in a classic script, so the page uses `say`.
+
 ## F2 generator app
 
 - Create `crates/webwrap-generator`, a Tauri app with binary `tauri_generator`. It embeds both templates the way `webwrap-generate/build.rs` does.

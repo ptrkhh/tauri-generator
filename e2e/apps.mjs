@@ -26,6 +26,12 @@ function declineOffer(exe) {
 
 export function launch(exe, debugPort, args = []) {
   declineOffer(exe);
+  return start(exe, debugPort, args);
+}
+
+/** Start any WebWrap executable with a DevTools port, its stderr captured
+ * in `child.log`. `launch` is this plus the generated apps' offer decline. */
+export function start(exe, debugPort, args = []) {
   const child = spawn(exe, args, {
     env: {
       ...process.env,
@@ -140,7 +146,8 @@ export function pickInDialog(pid, file) {
   // EnumWindows finds the dialog however UI Automation lists it. UI
   // Automation does not expose the dialog's file-name box or Open button on
   // the runners, but both are classic child windows with fixed control ids:
-  // 1148 for the file name and 1 for Open.
+  // 1148 for the file name (1152, a plain Edit, in a folder picker, as CI
+  // showed for the generator's) and 1 for Open.
   const script = `
     $ErrorActionPreference = 'Stop'
     Add-Type -TypeDefinition @'
@@ -158,18 +165,31 @@ export function pickInDialog(pid, file) {
         [DllImport("user32.dll")] static extern bool PostMessage(IntPtr window, uint message, IntPtr w, IntPtr l);
         static string Class(IntPtr window) { var name = new StringBuilder(256); GetClassName(window, name, 256); return name.ToString(); }
         static string Text(IntPtr window) { var text = new StringBuilder(256); GetWindowText(window, text, 256); return text.ToString(); }
-        // A dialog with a file-name box (id 1148), so a message box is never taken for it.
+        // A dialog with a file-name or folder box, so a message box is never taken for it.
         public static IntPtr Find(uint[] pids) {
           IntPtr found = IntPtr.Zero;
           EnumWindows((window, data) => {
             uint owner; GetWindowThreadProcessId(window, out owner);
             if (Array.IndexOf(pids, owner) >= 0 && IsWindowVisible(window) && Class(window) == "#32770" &&
-                Children(window).Exists((child) => GetDlgCtrlID(child) == 1148)) found = window;
+                Children(window).Exists((child) => GetDlgCtrlID(child) == 1148 || GetDlgCtrlID(child) == 1152)) found = window;
             return true;
           }, IntPtr.Zero);
           return found;
         }
         public static string Title(IntPtr window) { return Text(window); }
+        // For a failure report: every visible window of these processes, with its controls.
+        public static string Describe(uint[] pids) {
+          var text = new StringBuilder();
+          EnumWindows((window, data) => {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (Array.IndexOf(pids, owner) < 0 || !IsWindowVisible(window)) return true;
+            text.Append(Class(window) + " '" + Text(window) + "' [");
+            foreach (var child in Children(window)) if (GetDlgCtrlID(child) != 0) text.Append(Class(child) + "#" + GetDlgCtrlID(child) + " ");
+            text.Append("]; ");
+            return true;
+          }, IntPtr.Zero);
+          return text.ToString();
+        }
         static List<IntPtr> Children(IntPtr parent) {
           var all = new List<IntPtr>();
           EnumChildWindows(parent, (window, data) => { all.Add(window); return true; }, IntPtr.Zero);
@@ -181,8 +201,8 @@ export function pickInDialog(pid, file) {
           foreach (var child in Children(dialog)) {
             int id = GetDlgCtrlID(child);
             string cls = Class(child);
-            if (id == 1148 || id == 1) seen.Append(cls + "#" + id + " ");
-            if (id == 1148 && cls == "Edit") name = child;
+            if (id == 1148 || id == 1152 || id == 1) seen.Append(cls + "#" + id + " ");
+            if ((id == 1148 || id == 1152) && cls == "Edit") name = child;
             if (id == 1148 && name == IntPtr.Zero) {
               foreach (var inner in Children(child)) if (Class(inner) == "Edit") name = inner;
             }
@@ -208,7 +228,7 @@ export function pickInDialog(pid, file) {
       $dialog = [OpenDialog]::Find([uint32[]]$pids)
       if ($dialog -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 500 }
     } until ($dialog -ne [IntPtr]::Zero -or (Get-Date) -gt $deadline)
-    if ($dialog -eq [IntPtr]::Zero) { 'no open dialog appeared'; exit }
+    if ($dialog -eq [IntPtr]::Zero) { 'no open dialog appeared (windows: ' + [OpenDialog]::Describe([uint32[]]$pids) + ')'; exit }
     [Console]::Error.WriteLine("  open dialog titled '" + [OpenDialog]::Title($dialog) + "'")
     Start-Sleep -Milliseconds 1000
     $result = [OpenDialog]::Pick($dialog, $env:PICK_PATH)
