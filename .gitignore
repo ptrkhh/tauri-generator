@@ -3,3 +3,4 @@
 /.superpowers/
 /spikes/*/gen/
 /crates/*/gen/
+/.playwright-mcp/
