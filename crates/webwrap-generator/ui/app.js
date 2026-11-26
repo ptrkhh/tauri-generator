@@ -204,7 +204,13 @@ async function generate() {
   if (!found || !icons[selected]) return;
   const button = /** @type {HTMLButtonElement} */ ($('generate'));
   /** @type {string | null} */
-  const folder = await invoke('pick_folder');
+  let folder;
+  try {
+    folder = await invoke('pick_folder');
+  } catch (error) {
+    say(String(error), true);
+    return;
+  }
   if (!folder) return;
   button.disabled = true;
   say('Generating…');

@@ -176,6 +176,19 @@ export function pickInDialog(pid, file) {
           return found;
         }
         public static string Title(IntPtr window) { return Text(window); }
+        // For a failure report: every visible window of these processes, with its controls.
+        public static string Describe(uint[] pids) {
+          var text = new StringBuilder();
+          EnumWindows((window, data) => {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (Array.IndexOf(pids, owner) < 0 || !IsWindowVisible(window)) return true;
+            text.Append(Class(window) + " '" + Text(window) + "' [");
+            foreach (var child in Children(window)) if (GetDlgCtrlID(child) != 0) text.Append(Class(child) + "#" + GetDlgCtrlID(child) + " ");
+            text.Append("]; ");
+            return true;
+          }, IntPtr.Zero);
+          return text.ToString();
+        }
         static List<IntPtr> Children(IntPtr parent) {
           var all = new List<IntPtr>();
           EnumChildWindows(parent, (window, data) => { all.Add(window); return true; }, IntPtr.Zero);
@@ -214,7 +227,7 @@ export function pickInDialog(pid, file) {
       $dialog = [OpenDialog]::Find([uint32[]]$pids)
       if ($dialog -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 500 }
     } until ($dialog -ne [IntPtr]::Zero -or (Get-Date) -gt $deadline)
-    if ($dialog -eq [IntPtr]::Zero) { 'no open dialog appeared'; exit }
+    if ($dialog -eq [IntPtr]::Zero) { 'no open dialog appeared (windows: ' + [OpenDialog]::Describe([uint32[]]$pids) + ')'; exit }
     [Console]::Error.WriteLine("  open dialog titled '" + [OpenDialog]::Title($dialog) + "'")
     Start-Sleep -Milliseconds 1000
     $result = [OpenDialog]::Pick($dialog, $env:PICK_PATH)
