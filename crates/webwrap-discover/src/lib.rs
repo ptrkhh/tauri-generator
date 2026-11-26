@@ -14,6 +14,7 @@ use dom_query::Document;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::StatusCode;
+use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 use webwrap_spec::{app_identity, canonicalize_url, check_assoc, Adapter, Assoc};
@@ -35,7 +36,8 @@ const IMAGE_TYPES: &[&str] = &[
     "image/gif",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Candidate {
     /// Where it was found: "manifest", "apple-touch-icon", "icon", "favicon".
     pub label: &'static str,
@@ -44,13 +46,15 @@ pub struct Candidate {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Row {
     pub assoc: Assoc,
     pub ticked: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Discovery {
     /// Canonical URL the app wraps: the typed one, moved along permanent
     /// redirects only.

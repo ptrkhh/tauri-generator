@@ -26,6 +26,12 @@ function declineOffer(exe) {
 
 export function launch(exe, debugPort, args = []) {
   declineOffer(exe);
+  return start(exe, debugPort, args);
+}
+
+/** Start any WebWrap executable with a DevTools port, its stderr captured
+ * in `child.log`. `launch` is this plus the generated apps' offer decline. */
+export function start(exe, debugPort, args = []) {
   const child = spawn(exe, args, {
     env: {
       ...process.env,

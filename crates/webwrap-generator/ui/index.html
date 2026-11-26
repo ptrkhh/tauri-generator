@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>WebWrap Generator</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>WebWrap Generator</h1>
+
+  <form id="find">
+    <label for="url">Website</label>
+    <div class="row">
+      <input id="url" placeholder="twitter.com" autocomplete="off" spellcheck="false" required autofocus>
+      <button id="find-button">Find</button>
+    </div>
+  </form>
+
+  <p id="status" role="status"></p>
+
+  <section id="details" hidden>
+    <div class="fields">
+      <label for="name">Name</label>
+      <input id="name" required>
+      <label for="slug">File name</label>
+      <div>
+        <input id="slug" required spellcheck="false">
+        <p class="hint" id="files"></p>
+      </div>
+      <span>Website</span>
+      <span id="wrapped"></span>
+      <span>Adapter</span>
+      <span id="adapter"></span>
+    </div>
+
+    <h2>Icon</h2>
+    <div id="gallery" role="radiogroup" aria-label="Icon"></div>
+    <input id="upload" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,.ico" hidden>
+
+    <h2>Open with</h2>
+    <div id="assocs"></div>
+    <form id="add-assoc" class="row">
+      <input id="add-ext" placeholder=".ext" aria-label="Extension" spellcheck="false" required>
+      <input id="add-mime" placeholder="type/subtype" aria-label="MIME type" spellcheck="false" required>
+      <input id="add-desc" placeholder="Description" aria-label="Description" required>
+      <button>Add</button>
+    </form>
+
+    <button id="generate" class="primary">Generate…</button>
+  </section>
+
+  <section id="result" hidden aria-live="polite">
+    <h2>Done</h2>
+    <ul id="outputs"></ul>
+  </section>
+</main>
+</body>
+</html>
