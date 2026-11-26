@@ -110,7 +110,7 @@ F completes gate 1's Windows side end to end: a generator a person uses, not onl
 - **Candidate bytes.** They cross the IPC as JSON number arrays, up to 12 x 2 MB in the worst case. Real icons are kilobytes. If this is ever slow, a per-candidate `tauri::ipc::Response` is the fix.
 - **One site under two names.** Typing `twitter.com` and then `x.com` gives one app, with one identity and one data folder, under two file names. Each file works. Re-registering from the other file re-offers the association.
 - **Small favicons.** One upscaled to 256x256 looks soft. The gallery shows it, and the user chooses.
-- **The `rustls` crypto provider (`aws-lc-sys`).** It has cross-compiled for ARM64 but has not been built natively on `windows-11-arm`. F2's first CI run proves it. If that fails, `native-tls` (SChannel) is the fallback, and it also uses the Windows store.
+- ~~**The `rustls` crypto provider (`aws-lc-sys`)** had not been built natively on `windows-11-arm`.~~ Retired: F1's CI run built it and passed the discovery tests natively on both runners (2026-11-26).
 
 ## Open items for later
 
