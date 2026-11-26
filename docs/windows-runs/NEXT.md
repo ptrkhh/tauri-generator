@@ -1,4 +1,4 @@
-# Next Windows run: E's Open with and double-click checks, and the rest of D1-D4's
+# Next Windows run: E's Open with and double-click checks, F's generator, and the rest of D1-D4's
 
 Branch `main`. Plans:
 
@@ -6,9 +6,10 @@ Branch `main`. Plans:
 - `docs/superpowers/plans/2026-11-20-vscode-dev-adapter.md` (D2, merged);
 - `docs/superpowers/plans/2026-11-20-photopea-adapter.md` (D3, merged);
 - `docs/superpowers/plans/2026-11-21-generic-sites.md` (D4, merged);
-- `docs/superpowers/plans/2026-11-24-association-registration.md` (E, merged).
+- `docs/superpowers/plans/2026-11-24-association-registration.md` (E, merged);
+- `docs/superpowers/plans/2026-11-26-generator-ui.md` (F, merged).
 
-CI already drove all four end to end on x64 and ARM64, including live vscode.dev, live Photopea with a 150 MB PSD, and live Excalidraw. The 2026-11-21 run (`2026-11-21-results.md`) passed A-E, G-I and K, which are not repeated. This run does E's checks T-V first, then redoes F with the right link, retests J after its fix, and does L-S for the first time. CI already checked E's registry writes and the command they store; T-V check what only Explorer and a person can. It checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
+CI already drove all four end to end on x64 and ARM64, including live vscode.dev, live Photopea with a 150 MB PSD, and live Excalidraw. The 2026-11-21 run (`2026-11-21-results.md`) passed A-E, G-I and K, which are not repeated. This run does E's checks T-V first, then F's W-Y, then redoes F with the right link, retests J after its fix, and does L-S for the first time. CI already checked E's registry writes and the command they store; T-V check what only Explorer and a person can. It checks only what needs a person: windows coming to the front, message boxes, dragging with the mouse, the keyboard, and the Windows Open dialog. Nothing here needs a compiler.
 
 ## 1. Get the apps
 
@@ -19,7 +20,7 @@ CI already drove all four end to end on x64 and ARM64, including live vscode.dev
    - The artifact is `acceptance-aarch64-pc-windows-msvc` if `$env:PROCESSOR_ARCHITECTURE` is `ARM64`, otherwise `acceptance-x86_64-pc-windows-msvc`.
    - Download it with `gh run download <databaseId> --repo ptrkhh/tauri-generator -n <artifact> -D <folder>\apps`.
    - If `gh` is missing or not logged in, give me the run `url` and ask me to download and extract it there.
-3. Let `<arch>` be `arm64` or `x64` to match. The folder must contain `excalidraw-<arch>.exe`, `photopea-<arch>.exe`, `twitter-<arch>.exe`, and `vscode-<arch>.exe`.
+3. Let `<arch>` be `arm64` or `x64` to match. The folder must contain `excalidraw-<arch>.exe`, `photopea-<arch>.exe`, `twitter-<arch>.exe`, `vscode-<arch>.exe`, and `tauri_generator-<arch>.exe`.
 4. Copy `docs\windows-runs\fixtures\photopea-red.png` from the repo into the work folder as `red.png`.
 5. Make the folder `%USERPROFILE%\Documents\webwrap-run-<timestamp>`, which the vscode.dev checks use. It must not be under `%TEMP%`: vscode.dev cannot use files in folders Windows keeps for apps. Create `note-three.md` there, as UTF-8 without BOM, containing `third` and CRLF, and `double.md` the same way containing `double`. Also put a PSD there as `double.psd`: a copy of your own, or, if you have none, one made in Photopea at photopea.com in a browser (File > New, then File > Save as PSD) and moved there from Downloads.
 
@@ -42,6 +43,21 @@ Close every Excalidraw, Photopea, Twitter, and VS Code app window before startin
   4. For `double.md`, ask me to use Open with > Choose another app > **VS Code** > Always. Expected: the VS Code app opens it showing `double`. Ask me to change it to `doubled` and press Ctrl+S, allowing any prompt. Check with `Get-Content -Raw`: `doubled` plus CRLF. Close it, double-click `double.md`, and expect it to open directly.
   5. Moving the app re-offers. Copy `photopea-<arch>.exe` into a new folder `<work folder>\moved` and launch the copy. Expected: the offer box again (the registration points at the original). Ask me to answer **No**, then close it.
   6. Clean up: run `& <exe> --unregister-associations | Out-String` on the original `photopea-<arch>.exe` and `vscode-<arch>.exe`, and record the output. Then ask me to reset the .psd and .md defaults in Settings > Apps > Default apps if I want my previous ones back.
+
+**F: the generator.** CI already drove it against a local site. These check real sites and what a person sees. Make a new empty folder `<work folder>\generated`.
+
+- **W. Real sites.** Launch `tauri_generator-<arch>.exe`. For each of `twitter.com`, `photopea.com` and `vscode.dev`, ask me to type it and press **Find**, and record what the form shows. Expected:
+  - the Website line shows `https://x.com/`, `https://www.photopea.com/` and `https://vscode.dev/`;
+  - the file name shows `twitter`, `photopea` and `vscode`;
+  - the gallery shows each site's real icon first, plus Initials;
+  - Open with: nothing ticked for Twitter, only `.psd` for Photopea (with about 30 more unticked), and only `.md` for vscode.dev.
+
+  Then ask me to press **Generate…** for each, and pick `<work folder>\generated` in the folder picker. Expected: two files per site, each "created", and **Show in folder** selects the file in Explorer.
+- **X. The chosen icon is the app's icon.** Launch `<work folder>\generated\twitter-<arch>.exe`. Expected: the window and taskbar show the icon that was selected in the gallery, and Twitter (X) loads. If it offers Open with registration, answer **No**. Close it.
+- **Y. Regenerating.**
+  1. Ask me to Find `twitter.com` again, choose the **Initials** icon, and generate into the same folder. Expected: both files "updated", and the app now shows the initials icon.
+  2. Then ask me to Find `excalidraw.com`, change the file name to `twitter`, and generate into the same folder. Expected: both files "replaced another generated app".
+  3. Record anything that looked wrong or confusing in the window, in my words.
 
 Close every app before the D1 checks.
 
@@ -126,6 +142,8 @@ Close every app afterwards. Delete the Documents folder from step 5.
 - For T, the offer box's text, word for word.
 - For U, where each app appeared in Open with.
 - For V, the prompt Windows showed on the first double-click, and the unregister output.
+- For W, the name, icon and ticked associations each site got.
+- For Y, anything confusing in the generator window.
 - For J, which dialog Ctrl+O opened, and any permission prompt.
 - For L, the file's size and the seconds until it opened.
 - For M and N, whether the keyboard shortcuts worked or the menu was needed.
