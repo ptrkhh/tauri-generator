@@ -40,7 +40,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cargo fmt --all -- --check
-      - run: cargo test -p webwrap-spec -p webwrap-bridge
+      - run: cargo test -p webwrap-spec -p webwrap-bridge -p webwrap-discover
       # The generator embeds both architectures' runtime, so every runner
       # builds both release templates; the packaging tests use them too.
       - name: Build the runtime templates for both architectures
@@ -56,7 +56,7 @@ jobs:
       - run: cargo test -p webwrap-runtime --target ${{ matrix.target }}
       - name: Probe regenerating over a running app
         run: cargo test -p webwrap-pack --target ${{ matrix.target }} --test running_app -- --ignored --nocapture
-      - run: cargo clippy -p webwrap-spec -p webwrap-bridge -p webwrap-pack -p webwrap-generate -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
+      - run: cargo clippy -p webwrap-spec -p webwrap-bridge -p webwrap-discover -p webwrap-pack -p webwrap-generate -p webwrap-runtime --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: Build the generator and the acceptance apps
         shell: pwsh
         env:

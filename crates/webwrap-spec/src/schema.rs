@@ -181,7 +181,9 @@ fn check_origin(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_assoc(assoc: &Assoc) -> Result<(), String> {
+/// The rules every file association must meet. Public so the generator can
+/// drop a site's declared association before it reaches a spec.
+pub fn check_assoc(assoc: &Assoc) -> Result<(), String> {
     let extension = &assoc.extension;
     let Some(rest) = extension.strip_prefix('.') else {
         return Err(format!("extension {extension} must start with a dot"));

@@ -1,6 +1,6 @@
 # Generator UI and Discovery Design (sub-project F)
 
-Date: 2026-11-25. Status: approved by the user 2026-11-26. Plan: not yet written.
+Date: 2026-11-25. Status: approved by the user 2026-11-26. Plan: [`2026-11-26-generator-ui.md`](../plans/2026-11-26-generator-ui.md).
 
 ## Summary
 
@@ -44,7 +44,9 @@ A new plain-Rust crate, **`crates/webwrap-discover`**, so it is tested on Linux.
    4. the order within a source puts declared square sizes first, largest first.
 
    The first 12 are fetched, each with its source label. A manifest's icon `src` resolves against the manifest's URL, and a link's `href` against the final page URL.
-5. **File associations from the manifest.** These are the manifest's `file_handlers[].accept` entries, a MIME type mapped to extensions, one row per extension. Discovery lowercases each extension and drops any that the schema's extension and MIME rules would reject: `check_assoc` is private and does not lowercase. The description is the handler's `name`, or else `<EXT> file`.
+   - **Maskable icons go last.** Manifest icons whose `purpose` lacks `any` are designed to be cropped, so they look padded as desktop icons and sort after the others.
+   - **vscode.dev links its manifest from a script.** That script adds `<link rel="manifest">`, `apple-touch-icon` and `icon` at run time. So for an adapter site whose page links no manifest, discovery uses the adapter's known manifest path, `/static/stable/code.webmanifest`, which gives "Code" and its PNG icons. The weekly live run notices if that path moves (added in F1 after the live check, 2026-11-26).
+5. **File associations from the manifest.** These are the manifest's `file_handlers[].accept` entries, a MIME type mapped to extensions, one row per extension. Discovery lowercases each extension and drops any that the schema's `check_assoc` rejects. That function was made public for this in F1 rather than duplicated. The description is the handler's `name`, or else `<EXT> file`.
 6. **Presets**, added by adapter. They are merged by extension, and a preset replaces a manifest row for the same extension, because the schema refuses an extension claimed twice:
    - Photopea: `.psd` ticked.
    - vscode.dev: `.md` ticked. `.txt`, `.json`, `.js`, `.ts`, `.css`, `.html`, `.py`, `.yaml` and `.xml` are offered unticked.
